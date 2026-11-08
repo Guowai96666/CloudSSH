@@ -58,7 +58,8 @@ describe('Agent conversation threads', () => {
     const threads = await (await list()).json<{ threads: any[]; active_thread_id: string }>();
     expect(threads.threads).toHaveLength(2);
     expect(threads.active_thread_id).toBe(second);
-    expect(threads.threads.map(thread => thread.title)).toEqual(['第二段话题', '第一段话题']);
+    // 同一毫秒内建两条线程时 updated_at 相同，顺序由 thread_id 兜底，故比较集合。
+    expect(threads.threads.map(thread => thread.title).sort()).toEqual(['第一段话题', '第二段话题'].sort());
   });
 
   it('activates, renames and deletes a single thread', async () => {

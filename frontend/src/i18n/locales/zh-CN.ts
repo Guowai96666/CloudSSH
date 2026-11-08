@@ -572,7 +572,7 @@ export const zhCN = {
   'agent.modeAutoShort': 'Auto',
   'agent.modeAutoTooltip': 'Auto 模式：需确认的操作将在 3 秒后自动批准',
   'agent.newChat': '新建会话',
-  'agent.newChatConfirm': '确定要开启新建会话吗？（将清空当前对话上下文）',
+  'agent.newChatConfirm': '开始一条新的会话？当前会话会保存到「会话历史」，可以随时再打开。',
   'agent.historyRestored': '已恢复上次对话记录，可直接接着问。',
   'agent.threadsTitle': '会话历史',
   'agent.threadsHeader': '会话历史',

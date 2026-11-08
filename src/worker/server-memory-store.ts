@@ -144,7 +144,8 @@ export class ServerMemoryStore {
 
   private threadRows(serverId: number, userId: number): ConversationThreadRow[] {
     return this.query<ConversationThreadRow>(`SELECT thread_id, title, title_custom, message_count, created_at, updated_at
-      FROM agent_conversation_threads WHERE user_id = ? AND server_id = ? ORDER BY updated_at DESC LIMIT ?`,
+      FROM agent_conversation_threads WHERE user_id = ? AND server_id = ?
+      ORDER BY updated_at DESC, created_at DESC, thread_id DESC LIMIT ?`,
       userId, serverId, MAX_CONVERSATION_THREADS);
   }
 

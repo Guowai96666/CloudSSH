@@ -777,7 +777,11 @@ export class AgentPanel {
         if (this.isAgentRunning) break;
         this.activeRequestId = null;
         this.isAgentRunning = false;
+        // 新线程 id：面板据此定位当前会话，历史抽屉随之刷新。
+        if (typeof msg.threadId === 'string' && msg.threadId) this.activeThreadId = msg.threadId;
+        this.transcriptLoaded = true;
         this.updateInputState();
+        void this.refreshThreads();
         break;
       case 'context_status':
         if (msg.compacted && msg.checkpointSource === 'local') {
@@ -952,11 +956,12 @@ export class AgentPanel {
 
   private async handleNewChat(): Promise<void> {
     if (this.disposed || this.connection !== 'online' || this.isStopping) return;
+    // 新建只开一条新线程，旧会话完整保留，因此不再需要破坏性确认。
     if (this.sessionMessages.length > 0 || this.isAgentRunning) {
       const ok = await confirmAction({
         title: t('agent.newChat'),
         message: t('agent.newChatConfirm'),
-        variant: 'danger',
+        variant: 'info',
       });
       if (!ok) return;
     }
@@ -964,7 +969,6 @@ export class AgentPanel {
     if (this.disposed || this.connection !== 'online') return;
     this.clearStateSync();
     this.activeThreadId = '';
-    // 服务端开一条新线程，旧对话完整保留在「会话历史」里。
     this.wsSend?.(JSON.stringify({ type: 'agent_reset' }));
     this.resetPanelState();
     void this.refreshThreads();

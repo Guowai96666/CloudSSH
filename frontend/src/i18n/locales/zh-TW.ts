@@ -573,7 +573,7 @@ export const zhTW = {
   'agent.modeAutoShort': 'Auto',
   'agent.modeAutoTooltip': 'Auto 模式：需確認的操作將在 3 秒後自動批准',
   'agent.newChat': '新增會話',
-  'agent.newChatConfirm': '確定要開啟新增會話嗎？（將清除目前對話上下文）',
+  'agent.newChatConfirm': '開始一條新的會話？目前會話會存到「會話歷史」，可隨時再開啟。',
   'agent.historyRestored': '已恢復上次對話記錄，可直接接著問。',
   'agent.threadsTitle': '會話歷史',
   'agent.threadsHeader': '會話歷史',

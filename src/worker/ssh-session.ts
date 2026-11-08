@@ -2954,6 +2954,43 @@ export class SSHSession {
 
   // ==================== Agent Integration ====================
 
+  /**
+   * 懒创建 AgentCore（含记忆 provider）。
+   * 「新建对话」在首次发消息之前就要建线程，因此这里也要能按需构造。
+   * @returns 是否可用（缺少登录身份或环境时返回 false）。
+   */
+  private ensureAgentCore(): boolean {
+    if (this.agentCore) return true;
+    let memoryProvider: AgentMemoryProvider | undefined;
+    const serverId = this.config.serverId;
+    const uid = this.userId;
+    const gid = this.githubId;
+    const env = this.env;
+    if (serverId && uid && gid && env) {
+      memoryProvider = createAgentMemoryProvider(
+        env,
+        this.config.userDbRouteKey || gid,
+        uid,
+        serverId
+      );
+    }
+    this.agentMemoryProvider = memoryProvider;
+    this.agentCore = new AgentCore(
+      this.terminalContext,
+      (msg: any) => this.sendAgentFrame(msg),
+      async (uId: string) =>
+        this.fetchAgentAIConfig(uId, this.config.userDbRouteKey || this.githubId!),
+      async (command: string, timeout: number, signal?: AbortSignal) =>
+        this.executeAgentCommand(command, timeout, signal),
+      async (command: string, reason: string, signal?: AbortSignal) =>
+        this.askAgentConfirmation(command, reason, signal),
+      undefined,
+      memoryProvider,
+      this.waitUntil
+    );
+    return true;
+  }
+
   private async handleAgentStart(
     userMessage: string,
     userId?: string,
@@ -3012,35 +3049,15 @@ export class SSHSession {
       }
     }
 
-    if (!this.agentCore) {
-      let memoryProvider: AgentMemoryProvider | undefined;
-      const serverId = this.config.serverId;
-      const uid = this.userId;
-      const gid = this.githubId;
-      const env = this.env;
-      if (serverId && uid && gid && env) {
-        memoryProvider = createAgentMemoryProvider(
-          env,
-          this.config.userDbRouteKey || gid,
-          uid,
-          serverId
-        );
-      }
-
-      this.agentMemoryProvider = memoryProvider;
-      this.agentCore = new AgentCore(
-        this.terminalContext,
-        (msg: any) => this.sendAgentFrame(msg),
-        async (uId: string) =>
-          this.fetchAgentAIConfig(uId, this.config.userDbRouteKey || this.githubId!),
-        async (command: string, timeout: number, signal?: AbortSignal) =>
-          this.executeAgentCommand(command, timeout, signal),
-        async (command: string, reason: string, signal?: AbortSignal) =>
-          this.askAgentConfirmation(command, reason, signal),
-        undefined,
-        memoryProvider,
-        this.waitUntil
-      );
+    // 身份校验已通过：按需构造 core（首次 agent_start 与新建对话共用）。
+    if (!this.ensureAgentCore()) {
+      this.sendAgentFrame({ type: 'agent_frame', subType: 'error', message: 'AI 助手不可用' });
+      return;
+    }
+    const core = this.agentCore;
+    if (!core) {
+      this.sendAgentFrame({ type: 'agent_frame', subType: 'error', message: 'AI 助手不可用' });
+      return;
     }
 
     const locale =
@@ -3051,7 +3068,7 @@ export class SSHSession {
       requestedTimezone.length <= 64
         ? requestedTimezone
         : undefined;
-    void this.agentCore.handleAgentStart(effectiveUserId, userMessage, locale, timezone, userIndex, requestId);
+    void core.handleAgentStart(effectiveUserId, userMessage, locale, timezone, userIndex, requestId);
   }
 
   private sendAgentState(syncId: unknown): void {
@@ -3090,10 +3107,23 @@ export class SSHSession {
     }
     if (type === 'agent_reset') {
       this.finishAgentConfirmation(false);
-      this.agentCore?.resetSession();
-      this.sendAgentFrame({
-        type: 'agent_frame',
-        subType: 'reset_done',
+      // 新建对话 = 新建一条独立线程；旧线程的记录保持可打开。
+      // AgentCore 只在首次 agent_start 时创建；这里按需建一个，只用到 provider。
+      if (!this.ensureAgentCore()) {
+        this.sendAgentFrame({ type: 'agent_frame', subType: 'reset_done', threadId: null });
+        return;
+      }
+      void this.agentCore!.newConversation().then(threadId => {
+        this.sendAgentFrame({ type: 'agent_frame', subType: 'reset_done', threadId: threadId || null });
+        // 让已打开的会话历史抽屉立即看到新线程。
+        const provider = this.agentMemoryProvider;
+        if (!provider) return;
+        void provider.listConversations().then(list => {
+          this.sendAgentFrame({ type: 'agent_frame', subType: 'threads', threads: list.threads,
+            activeThreadId: list.active_thread_id });
+        }).catch(() => undefined);
+      }).catch(() => {
+        this.sendAgentFrame({ type: 'agent_frame', subType: 'reset_done', threadId: null });
       });
       return;
     }

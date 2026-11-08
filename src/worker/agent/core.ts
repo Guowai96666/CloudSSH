@@ -112,7 +112,11 @@ export class AgentCore {
    * 「新建对话」：丢弃内存上下文并切换到一条新线程。
    * 旧线程的记录保留在服务端，可随时从会话历史重新打开。
    */
-  resetSession(): void {
+  /**
+   * 「新建对话」：开一条独立的空线程并切过去，旧线程完整保留在会话历史里。
+   * @returns 新线程 id（未配置记忆 provider 时为空串）。
+   */
+  async newConversation(): Promise<string> {
     this.agentAbort('reset');
     ++this.runId;
     this.recovery = emptyAgentSessionState(this.runId);
@@ -123,11 +127,15 @@ export class AgentCore {
     this.boundConfig = null;
     this.environment = '';
     const provider = this.memoryProvider;
-    if (!provider) return;
-    const started = provider.createConversation()
-      .then(threadId => { this.activeThreadId = threadId; })
-      .catch(() => undefined);
-    this.waitUntil?.(started);
+    if (!provider) return '';
+    const threadId = await provider.createConversation().catch(() => '');
+    if (threadId) this.activeThreadId = threadId;
+    return threadId;
+  }
+
+  /** 兼容旧调用点：重置后立刻开一条新线程（不等结果）。 */
+  resetSession(): void {
+    this.waitUntil?.(this.newConversation().catch(() => undefined));
   }
 
   /** 把已有线程切成当前线程，并丢弃内存上下文以便按该线程重新恢复。 */
@@ -436,10 +444,11 @@ export class AgentCore {
     if (context.hasRestoredTranscript()) return;
     const provider = this.memoryProvider;
     if (!provider) return;
+    // 已确定线程就只读这一条；没有线程时读当前线程，绝不跨线程拼接历史。
     const transcript = await abortable(
       provider.loadConversation(this.activeThreadId || undefined, signal).catch(() => null), signal);
     signal.throwIfAborted();
-    if (transcript?.thread_id) this.activeThreadId = transcript.thread_id;
+    if (!this.activeThreadId && transcript?.thread_id) this.activeThreadId = transcript.thread_id;
     context.restoreTranscript(transcript?.messages ?? []);
   }
 

@@ -11,7 +11,8 @@ function fixture(idleTimeout = '10s') {
   }, true, false, undefined, { IDLE_TIMEOUT: idleTimeout } as Env);
   const internal = session as any;
   internal.state = 'ready';
-  internal.agentCore = { getStatus: () => 'running', agentAbort: vi.fn(), resetSession: vi.fn() };
+  internal.agentCore = { getStatus: () => 'running', agentAbort: vi.fn(), resetSession: vi.fn(),
+    newConversation: vi.fn(async () => 'thread-12345678') };
   return { session, internal, ws, socket };
 }
 function request(ws: { send: ReturnType<typeof vi.fn> }) {

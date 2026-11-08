@@ -123,7 +123,7 @@ describe('Application-level long-task compaction in AgentCore', () => {
     await agent.handleAgentStart('1', 'Initial setup');
     const pending = agent.handleAgentStart('1', 'Inspect next');
     await vi.waitFor(() => expect(requests).toBeGreaterThanOrEqual(2));
-    agent.resetSession();
+    await agent.newConversation();
     await pending;
     expect((agent as any).context.buildInput()).toEqual([]);
     expect(frames.filter(frame => frame.subType === 'context_status' && frame.compacted)).toEqual([]);

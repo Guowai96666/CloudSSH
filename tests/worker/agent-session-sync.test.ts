@@ -28,6 +28,7 @@ async function start(session: SSHSession) {
   await session.handleWebSocketMessage(JSON.stringify({
     type: 'agent_start', message: 'inspect the server', requestId: 'original-request',
   }));
+  // 首轮只构造 core 并进入运行；测试需要在工具调用前拿到 core 引用。
 }
 
 async function cleanup(session: SSHSession) {
@@ -188,7 +189,7 @@ describe('Bounded Agent recovery view', () => {
       expect(internal.getSessionState().phase).toBe('stopping');
     } finally { agent.agentAbort('user_stopped'); await run; }
     expect(internal.getSessionState()).toMatchObject({ phase: 'idle', outcome: 'stopped' });
-    agent.resetSession();
+    await agent.newConversation();
     expect(internal.getSessionState()).toMatchObject({ phase: 'idle', requestId: null, text: '' });
   });
 });

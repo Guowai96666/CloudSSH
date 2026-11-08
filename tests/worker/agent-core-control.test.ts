@@ -5,13 +5,72 @@ import { aiConfig, functionCall, reply } from './agent/responses-fixtures';
 
 vi.mock('../../src/worker/agent/ssrf', () => ({ validateBaseUrlWithDNS: async () => ({ valid: true }) }));
 
-function setup(exec?: (command: string, timeout: number, signal?: AbortSignal) => Promise<any>, config = async () => aiConfig) {
+function setup(exec?: (command: string, timeout: number, signal?: AbortSignal) => Promise<any>, config = async () => aiConfig,
+  memory?: any) {
   const frames: any[] = [];
   const command = vi.fn(exec || (async () => ({ stdout: 'Linux', stderr: '', exitCode: 0 })));
-  const agent = new AgentCore(new TerminalContext(), frame => frames.push(frame), config, command, async () => true);
-  return { agent, frames, command };
+  const waits: Promise<unknown>[] = [];
+  const agent = new AgentCore(new TerminalContext(), frame => frames.push(frame), config, command,
+    async () => true, undefined, memory, (promise: Promise<unknown>) => { waits.push(promise); });
+  return { agent, frames, command, waits };
 }
 afterEach(() => vi.restoreAllMocks());
+
+describe('Conversation threads', () => {
+  const memory = () => {
+    const counter = { value: 0 };
+    const state = {
+      fetchUnifiedMemory: async () => ({ workLogs: [], knowledge: [], revision: 0 }),
+      enqueueMemory: async () => {},
+      loadedThreads: [] as string[],
+      appended: [] as Array<{ threadId?: string; messages: unknown[] }>,
+      created: 0,
+      loadConversation: async (threadId?: string) => {
+        state.loadedThreads.push(threadId ?? '');
+        return { thread_id: threadId ?? 'auto-thread-1', title: 't', title_custom: false,
+          created_at: 1, updated_at: 2, revision: 1, messages: [] };
+      },
+      appendConversation: async (messages: unknown[], threadId?: string) => {
+        state.appended.push({ threadId, messages });
+        return threadId ?? 'auto-thread-1';
+      },
+      listConversations: async () => ({ threads: [], active_thread_id: null }),
+      createConversation: async () => { state.created++; counter.value += 1; return `new-thread-${counter.value}`; },
+      activateConversation: async () => {},
+      renameConversation: async () => {},
+      deleteConversation: async () => {},
+    };
+    return state;
+  };
+
+  it('creates a brand-new thread for each new conversation and never reuses the old one', async () => {
+    const m: any = memory();
+    const { agent, waits } = setup(undefined, async () => aiConfig, m);
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(reply('done', 'ok'));
+
+    const first = await agent.newConversation();
+    expect(first).toBe('new-thread-1');
+    await agent.handleAgentStart('1', '第一轮'); await Promise.all(waits);
+    expect(m.appended.at(-1)?.threadId).toBe('new-thread-1');
+
+    const second = await agent.newConversation();
+    expect(second).toBe('new-thread-2');
+    expect(second).not.toBe(first);
+    await agent.handleAgentStart('1', '第二轮'); await Promise.all(waits);
+    expect(m.appended.at(-1)?.threadId).toBe('new-thread-2');
+    expect(m.created).toBe(2);
+  });
+
+  it('restores context only from the active thread, never by falling back to the newest one', async () => {
+    const m: any = memory();
+    const { agent, waits } = setup(undefined, async () => aiConfig, m);
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(reply('done', 'ok'));
+    const threadId = await agent.newConversation();
+    await agent.handleAgentStart('1', '在同一线程里追问'); await Promise.all(waits);
+    expect(m.loadedThreads).toContain(threadId);
+    expect(m.appended.at(-1)?.threadId).toBe(threadId);
+  });
+});
 
 describe('Responses task control', () => {
   it.each(['zh-CN', 'zh-TW', 'en-US'] as const)('stops and closes every call before continuing (%s)', async locale => {
@@ -48,7 +107,7 @@ describe('Responses task control', () => {
     await agent.handleAgentStart('1', '第二轮');
     expect(command).toHaveBeenCalledTimes(1);
     expect(requests[1].input).toContainEqual({ role: 'user', content: '第一轮' });
-    agent.resetSession();
+    await agent.newConversation();
     expect((agent as any).context.pending).toEqual([]);
     expect((agent as any).context.history).toEqual([]);
     await agent.handleAgentStart('1', '新会话');
@@ -95,7 +154,7 @@ describe('Responses task control', () => {
     await agent.handleAgentStart('1', '继续');
     expect(mock).toHaveBeenCalledTimes(1);
     expect(frames.find(frame => frame.code === 'responses_config_changed')).toBeDefined();
-    agent.resetSession();
+    await agent.newConversation();
     await agent.handleAgentStart('1', '新会话');
     expect(mock).toHaveBeenLastCalledWith('https://another.example/v1/responses', expect.anything());
   });
@@ -135,7 +194,7 @@ describe('Responses task control', () => {
     const { agent, command, frames } = setup(undefined, async () => loading);
     const fetchMock = vi.spyOn(globalThis, 'fetch');
     const pending = agent.handleAgentStart('1', '开始');
-    agent.resetSession();
+    await agent.newConversation();
     resolveConfig(aiConfig);
     await pending;
     expect(fetchMock).not.toHaveBeenCalled();

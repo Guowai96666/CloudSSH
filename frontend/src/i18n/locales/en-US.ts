@@ -623,7 +623,7 @@ export const enUS: Record<keyof typeof zhCN, string> = {
   'agent.modeAutoShort': 'Auto',
   'agent.modeAutoTooltip': 'Auto mode: Operations requiring confirmation will be auto-approved in 3s',
   'agent.newChat': 'New chat',
-  'agent.newChatConfirm': 'Start a new chat? (Current conversation context will be cleared)',
+  'agent.newChatConfirm': 'Start a new conversation? This one is saved to Conversations and can be reopened anytime.',
   'agent.historyRestored': 'Previous conversation restored; keep going anytime.',
   'agent.threadsTitle': 'Conversations',
   'agent.threadsHeader': 'Conversations',
