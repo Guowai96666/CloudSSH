@@ -3127,6 +3127,10 @@ export class SSHSession {
       });
       return;
     }
+    // 会话历史三类控制消息都需要记忆 provider；首次打开面板时 core 可能还没建。
+    if (type === 'agent_threads_list' || type === 'agent_thread_open' || type === 'agent_thread_delete') {
+      this.ensureAgentCore();
+    }
     // 展开「会话历史」：只读列表，不改变 Agent 状态。
     if (type === 'agent_threads_list') {
       const provider = this.agentMemoryProvider;
@@ -3161,8 +3165,20 @@ export class SSHSession {
       const provider = this.agentMemoryProvider;
       if (!provider) return;
       void provider.deleteConversation(threadId)
-        .then(() => this.sendAgentFrame({ type: 'agent_frame', subType: 'thread_deleted', threadId }))
-        .catch(() => this.sendAgentFrame({ type: 'agent_frame', subType: 'error', code: 'agent_thread_delete' }));
+        .then(() => {
+          this.sendAgentFrame({ type: 'agent_frame', subType: 'thread_deleted', threadId });
+          return provider.listConversations().then(list => {
+            this.sendAgentFrame({ type: 'agent_frame', subType: 'threads', threads: list.threads,
+              activeThreadId: list.active_thread_id });
+          });
+        })
+        .catch(() => {
+          this.sendAgentFrame({ type: 'agent_frame', subType: 'error', code: 'agent_thread_delete' });
+          void provider.listConversations().then(list => {
+            this.sendAgentFrame({ type: 'agent_frame', subType: 'threads', threads: list.threads,
+              activeThreadId: list.active_thread_id });
+          }).catch(() => undefined);
+        });
       return;
     }
   }

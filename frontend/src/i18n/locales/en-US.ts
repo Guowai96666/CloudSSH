@@ -628,6 +628,8 @@ export const enUS: Record<keyof typeof zhCN, string> = {
   'agent.threadsTitle': 'Conversations',
   'agent.threadsHeader': 'Conversations',
   'agent.threadsEmpty': 'No saved conversations yet; sending a message creates one.',
+  'agent.threadDeleteFailed': 'Failed to delete the conversation. Try again.',
+  'agent.threadOpenFailed': 'Failed to open the conversation. Try again.',
   'agent.threadMessages': 'messages',
   'agent.threadActive': 'Current',
   'agent.threadDelete': 'Delete conversation',

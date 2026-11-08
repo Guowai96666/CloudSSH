@@ -766,6 +766,12 @@ export class AgentPanel {
         }
         break;
       case 'error':
+        // 会话历史操作失败给明确提示，避免误以为按钮无效。
+        if (msg.code === 'agent_thread_delete' || msg.code === 'agent_thread_open') {
+          notify(t(msg.code === 'agent_thread_delete' ? 'agent.threadDeleteFailed' : 'agent.threadOpenFailed'),
+            { variant: 'danger' });
+          break;
+        }
         this.showError(msg.code ? responseErrorMessage(msg.code, msg.status, msg.diagnostics) : msg.message);
         // Pre-run SSH/auth errors have no run_end; protocol errors do.
         if (msg.runId == null) {
@@ -2288,7 +2294,11 @@ export class AgentPanel {
           variant: 'danger',
         });
         if (!ok) return;
-        this.wsSend?.(JSON.stringify({ type: 'agent_thread_delete', threadId }));
+        if (!this.wsSend) {
+          notify(t('agent.threadDeleteFailed'), { variant: 'danger' });
+          return;
+        }
+        this.wsSend(JSON.stringify({ type: 'agent_thread_delete', threadId }));
       });
     });
   }

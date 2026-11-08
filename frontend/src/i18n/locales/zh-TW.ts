@@ -578,6 +578,8 @@ export const zhTW = {
   'agent.threadsTitle': '會話歷史',
   'agent.threadsHeader': '會話歷史',
   'agent.threadsEmpty': '還沒有歷史會話；送出一則訊息就會自動建立。',
+  'agent.threadDeleteFailed': '刪除會話失敗，請重試。',
+  'agent.threadOpenFailed': '開啟會話失敗，請重試。',
   'agent.threadMessages': '則訊息',
   'agent.threadActive': '目前',
   'agent.threadDelete': '刪除會話',

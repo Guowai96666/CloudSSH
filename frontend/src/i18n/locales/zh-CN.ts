@@ -577,6 +577,8 @@ export const zhCN = {
   'agent.threadsTitle': '会话历史',
   'agent.threadsHeader': '会话历史',
   'agent.threadsEmpty': '还没有历史会话；发一条消息就会自动建一条。',
+  'agent.threadDeleteFailed': '删除会话失败，请重试。',
+  'agent.threadOpenFailed': '打开会话失败，请重试。',
   'agent.threadMessages': '条消息',
   'agent.threadActive': '当前',
   'agent.threadDelete': '删除会话',
