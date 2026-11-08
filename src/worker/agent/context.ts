@@ -1,7 +1,7 @@
 import { ResponsesError } from './responses-client';
 import { boundedToolOutput, bytes, estimateTokens,
   MAX_CONTEXT_BYTES, MAX_RETAINED_BYTES, MAX_TOOL_RESULT_BYTES } from './context-limits';
-import type { ModelResponse, ResponseFunctionCall, ResponseInput } from './types';
+import type { ModelResponse, ResponseFunctionCall, ResponseInput, ResponseMessage } from './types';
 
 export { boundedText } from './context-limits';
 export function observation(label: string, content: string): ResponseInput {
@@ -26,6 +26,7 @@ export class AgentContext {
   private reportedInputTokens = 0;
   private recent: ResponseInput[] = [];
   private openCalls = new Set<string>();
+  private restored = false;
 
   get earliestEditableTurn(): number { return this.turns.keys().next().value ?? this.nextTurn; }
   get canCheckpoint(): boolean { return this.history.length > 0 && !this.openCalls.size; }
@@ -55,6 +56,49 @@ export class AgentContext {
     if (!this.history.length && this.summary) this.pending = this.checkpointSegment(this.summary, this.recent);
     else this.pending.push({ role: 'user', content: message });
     this.pruneTurns();
+  }
+
+  /** 是否已经用持久化对话填充过模型历史（每个 AgentCore 生命周期只用一次）。 */
+  hasRestoredTranscript(): boolean { return this.restored; }
+
+  /**
+   * 用已持久化的可见对话重建模型历史，使面板重新打开后仍能接续同一段对话。
+   * 只在历史、摘要与待发项都为空时生效；已有上下文时返回 false 且不改动任何状态。
+   * @param messages 服务端保存的按时间升序的 user/assistant 正文。
+   * @returns 是否实际写入。
+   */
+  restoreTranscript(messages: readonly { role: string; content: string }[]): boolean {
+    if (!messages.length) return false;
+    if (this.history.length || this.pending.length || this.summary || this.openCalls.size) return false;
+    const rebuilt: ResponseInput[] = [];
+    for (const message of messages) {
+      const content = typeof message.content === 'string' ? message.content : '';
+      if (!content) continue;
+      if (message.role === 'user') rebuilt.push({ role: 'user', content });
+      else if (message.role === 'assistant') {
+        const assistant: ResponseMessage = { type: 'message', role: 'assistant', status: 'completed',
+          content: [{ type: 'output_text', text: content, annotations: [] }] };
+        rebuilt.push(assistant);
+      }
+    }
+    if (!rebuilt.length) return false;
+    const bounded: ResponseInput[] = [];
+    let size = 0;
+    // 保留最近的交流：从尾部往前装到 MAX_CONTEXT_BYTES 的四分之一，给本轮留出预算。
+    const limit = Math.floor(MAX_CONTEXT_BYTES / 4);
+    for (let index = rebuilt.length - 1; index >= 0; index--) {
+      const cost = bytes(rebuilt[index]);
+      if (bounded.length && size + cost > limit) break;
+      bounded.unshift(rebuilt[index]); size += cost;
+    }
+    this.history = bounded;
+    this.turns.clear();
+    this.nextTurn = 0;
+    this.recent = [];
+    this.pending = [];
+    this.tokens = estimateTokens(bounded);
+    this.restored = true;
+    return true;
   }
 
   observeTerminal(snapshot: string): void {

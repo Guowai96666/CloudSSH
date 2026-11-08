@@ -32,6 +32,53 @@ beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(1_800_000_000_000); f = 
 afterEach(() => { f.db.close(); vi.useRealTimers(); });
 const task: MemoryTask = { taskId: 'task-1', goal: '部署', conversation: '配置和部署操作', locale: 'zh-CN', timezone: 'UTC' };
 
+describe('Persisted agent conversation', () => {
+  const append = (messages: unknown) => f.store.handle(1, 'conversation-append',
+    new Request('http://internal/conversation', { method: 'POST', body: JSON.stringify({ user_id: 10, messages }) }));
+  const read = () => f.store.handle(1, 'conversation',
+    new Request('http://internal/conversation?user_id=10', { method: 'GET' }));
+
+  it('round-trips a turn, keeps order and bumps the revision', async () => {
+    expect((await append([{ role: 'user', content: '磁盘满了吗' },
+      { role: 'assistant', content: '已检查，根分区占用 92%' }])).status).toBe(201);
+    const transcript = await (await read()).json<{ messages: any[]; revision: number }>();
+    expect(transcript.messages.map(message => [message.role, message.content])).toEqual([
+      ['user', '磁盘满了吗'],
+      ['assistant', '已检查，根分区占用 92%'],
+    ]);
+    expect(transcript.messages[0].seq).toBeLessThan(transcript.messages[1].seq);
+    expect(transcript.revision).toBeGreaterThan(0);
+    expect(JSON.parse(await (await append([{ role: 'user', content: '继续' }])).text())).toEqual({ success: true, revision: 2 });
+  });
+
+  it('trims to the newest messages once the cap is exceeded', async () => {
+    const batch = Array.from({ length: 40 }, (_value, index) => ({ role: 'user', content: `m${index}` }));
+    for (let round = 0; round < 6; round++) await append(batch);
+    const transcript = await (await read()).json<{ messages: any[] }>();
+    expect(transcript.messages).toHaveLength(200);
+    expect(transcript.messages.at(-1)?.content).toBe('m39');
+  });
+
+  it('clears the transcript but keeps the revision monotonic', async () => {
+    await append([{ role: 'user', content: 'a' }]);
+    const before = await (await read()).json<{ revision: number }>();
+    const cleared = await f.store.handle(1, 'conversation',
+      new Request('http://internal/conversation', { method: 'DELETE', body: JSON.stringify({ user_id: 10 }) }));
+    expect(cleared.status).toBe(200);
+    const after = await (await read()).json<{ messages: any[]; revision: number }>();
+    expect(after.messages).toEqual([]);
+    expect(after.revision).toBeGreaterThan(before.revision);
+  });
+
+  it('rejects a cross-user read and a malformed append', async () => {
+    const foreign = await f.store.handle(1, 'conversation',
+      new Request('http://internal/conversation?user_id=20', { method: 'GET' }));
+    expect(foreign.status).toBe(403);
+    expect((await append([])).status).toBe(400);
+    expect((await append([{ role: 'system', content: 'x' }])).status).toBe(400);
+  });
+});
+
 describe('Saved memory and simple retry persistence', () => {
   it('stores and returns a complete reusable private key using the existing encrypted storage', async () => {
     const key = '  -----BEGIN PRIVATE KEY-----\n' + 'A'.repeat(2000) + '\n-----END PRIVATE KEY-----\n';

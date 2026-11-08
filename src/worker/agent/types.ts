@@ -1,4 +1,5 @@
 // Native, stateless Responses items and the small server-memory contract.
+import type { ConversationTranscript } from '../../agent-conversation-schema';
 import type {
   KnowledgeAction,
   KnowledgeCategory,
@@ -9,6 +10,7 @@ import type {
 } from '../../server-memory-schema';
 
 export type { ServerWorkLog, ServerKnowledgeItem, UnifiedServerMemory, KnowledgeCategory, WorkLogMode, KnowledgeAction };
+export type { ConversationTranscript, ConversationMessage } from '../../agent-conversation-schema';
 
 export interface ResponseFunctionCall {
   type: 'function_call';
@@ -138,4 +140,16 @@ export interface AgentMemoryBatch {
 export interface AgentMemoryProvider {
   fetchUnifiedMemory(signal?: AbortSignal): Promise<UnifiedServerMemory>;
   enqueueMemory(task: MemoryTask): Promise<void>;
+  /** 读取该服务器已持久化的可见对话，用于面板重开后恢复上下文。 */
+  loadConversation(signal?: AbortSignal): Promise<ConversationTranscript>;
+  /** 追加本轮可见对话；失败必须由调用方降级，不得中断任务。 */
+  appendConversation(messages: ConversationAppendInput[]): Promise<void>;
+  /** 「新对话」时清空服务端对话记录。 */
+  clearConversation(): Promise<void>;
+}
+
+/** 一条待持久化的可见对话消息。 */
+export interface ConversationAppendInput {
+  role: 'user' | 'assistant';
+  content: string;
 }

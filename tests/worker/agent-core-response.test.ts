@@ -254,7 +254,9 @@ describe('AgentCore Responses delivery and context', () => {
   it('submits interrupted conversation for background summarization without a separate evidence journal', async () => {
     let agent: AgentCore;
     const memory = { fetchUnifiedMemory: async () => ({ workLogs: [], knowledge: [], revision: 0 }),
-      enqueueMemory: vi.fn(async (_task: unknown) => {}) };
+      enqueueMemory: vi.fn(async (_task: unknown) => {}),
+      loadConversation: async () => ({ messages: [], revision: 0 }),
+      appendConversation: vi.fn(async () => {}), clearConversation: vi.fn(async () => {}) };
     const exec = vi.fn(async (command: string) => {
       if (!command.includes('PWD:$(pwd)')) agent.agentAbort('connection_closed');
       return { stdout: 'Listening on port 8080', stderr: '', exitCode: 0 };
@@ -272,7 +274,10 @@ describe('AgentCore Responses delivery and context', () => {
     const priorKeys = Array.from({ length: 4 }, (_, i) => ({ id: i + 1, user_id: 1, server_id: 1,
       category: 'credential', key: `other_key_${i}`, value: 'K'.repeat(15_000), created_at: 1, updated_at: 1 }));
     const memory = { fetchUnifiedMemory: async () => ({ revision: 1, workLogs: [], knowledge: [...priorKeys, { id: 5, user_id: 1, server_id: 1,
-      category: 'credential', key: 'service_api_key', value: key, created_at: 1, updated_at: 1 }] }), enqueueMemory: vi.fn(async () => {}) };
+      category: 'credential', key: 'service_api_key', value: key, created_at: 1, updated_at: 1 }] }),
+      enqueueMemory: vi.fn(async () => {}),
+      loadConversation: async () => ({ messages: [], revision: 0 }),
+      appendConversation: vi.fn(async () => {}), clearConversation: vi.fn(async () => {}) };
     const { agent, waits } = setup({ memory });
     const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(reply('done', 'Deployment completed.'));
     await agent.handleAgentStart('1', '部署服务'); await Promise.all(waits);

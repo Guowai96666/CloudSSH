@@ -4,6 +4,10 @@ import { CONSECUTIVE_TASK_WINDOW_MS, isSensitiveKeyOrValue, MAX_SERVER_KNOWLEDGE
   type UnifiedServerMemory } from '../server-memory-schema';
 import type { AgentMemoryBatch, MemoryTask } from './agent/types';
 import { bytes } from './agent/context-limits';
+import {
+  MAX_CONVERSATION_MESSAGES, normalizeConversationAppendInput,
+  type ConversationMessage, type ConversationRole, type ConversationTranscript,
+} from '../agent-conversation-schema';
 
 class MemoryStoreError extends Error {
   constructor(readonly status: number, message: string, readonly code?: string) { super(message); }
@@ -37,6 +41,15 @@ export class ServerMemoryStore {
         user_id INTEGER NOT NULL, server_id INTEGER NOT NULL, key TEXT NOT NULL,
         source TEXT NOT NULL DEFAULT '', scope TEXT NOT NULL DEFAULT '', encrypted INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY(user_id, server_id, key)
+      );
+      CREATE TABLE IF NOT EXISTS agent_conversation_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL, server_id INTEGER NOT NULL,
+        role TEXT NOT NULL, content TEXT NOT NULL, created_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS agent_conversation_state (
+        user_id INTEGER NOT NULL, server_id INTEGER NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(user_id, server_id)
       );
       CREATE TABLE IF NOT EXISTS agent_pending_distillations (
         user_id INTEGER NOT NULL, server_id INTEGER NOT NULL, task_id TEXT NOT NULL,
@@ -76,6 +89,61 @@ export class ServerMemoryStore {
 
   private bump(serverId: number, userId: number): void {
     this.db.exec('UPDATE agent_memory_state SET revision = revision + 1 WHERE user_id = ? AND server_id = ?', userId, serverId);
+  }
+
+  private conversationRevision(serverId: number, userId: number): number {
+    this.db.exec('INSERT OR IGNORE INTO agent_conversation_state(user_id, server_id, revision) VALUES (?, ?, 0)', userId, serverId);
+    return this.query<{ revision: number }>('SELECT revision FROM agent_conversation_state WHERE user_id = ? AND server_id = ?', userId, serverId)[0]?.revision ?? 0;
+  }
+
+  /**
+   * 读取该服务器最近的一段可见对话，供关闭面板后恢复上下文。
+   * @returns 按时间升序的消息与当前写入计数。
+   */
+  readConversation(serverId: number, userId: number): ConversationTranscript {
+    this.checkOwner(serverId, userId);
+    const revision = this.conversationRevision(serverId, userId);
+    const rows = this.query<{ id: number; role: string; content: string; created_at: number }>(`SELECT id, role, content, created_at
+      FROM agent_conversation_messages WHERE user_id = ? AND server_id = ? ORDER BY id DESC LIMIT ?`,
+      userId, serverId, MAX_CONVERSATION_MESSAGES);
+    const messages: ConversationMessage[] = rows.reverse().map(row => ({
+      seq: row.id,
+      role: row.role === 'assistant' ? 'assistant' : 'user',
+      content: row.content,
+      created_at: row.created_at,
+    }));
+    return { messages, revision };
+  }
+
+  /** 追加若干条对话消息并修剪超出上限的最旧记录，返回新的写入计数。 */
+  appendConversation(serverId: number, userId: number, input: { messages?: unknown }): number {
+    const normalized = normalizeConversationAppendInput(input);
+    if (!normalized.ok) throw new MemoryStoreError(400, normalized.error);
+    this.checkOwner(serverId, userId);
+    const now = Date.now();
+    return this.transaction(() => {
+      this.checkOwner(serverId, userId);
+      for (const message of normalized.value) {
+        this.db.exec('INSERT INTO agent_conversation_messages(user_id, server_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)',
+          userId, serverId, message.role as ConversationRole, message.content, now);
+      }
+      this.db.exec(`DELETE FROM agent_conversation_messages WHERE user_id = ? AND server_id = ? AND id NOT IN (
+        SELECT id FROM agent_conversation_messages WHERE user_id = ? AND server_id = ? ORDER BY id DESC LIMIT ?)`,
+        userId, serverId, userId, serverId, MAX_CONVERSATION_MESSAGES);
+      this.conversationRevision(serverId, userId);
+      this.db.exec('UPDATE agent_conversation_state SET revision = revision + 1 WHERE user_id = ? AND server_id = ?', userId, serverId);
+      return this.conversationRevision(serverId, userId);
+    });
+  }
+
+  /** 清空该服务器的对话记录（「新对话」与服务器删除时调用）。 */
+  clearConversation(serverId: number, userId: number): void {
+    this.checkOwner(serverId, userId);
+    this.transaction(() => {
+      this.db.exec('DELETE FROM agent_conversation_messages WHERE user_id = ? AND server_id = ?', userId, serverId);
+      this.conversationRevision(serverId, userId);
+      this.db.exec('UPDATE agent_conversation_state SET revision = revision + 1 WHERE user_id = ? AND server_id = ?', userId, serverId);
+    });
   }
 
   async read(serverId: number, userId: number): Promise<UnifiedServerMemory> {
@@ -180,6 +248,15 @@ export class ServerMemoryStore {
     try {
       const url = new URL(request.url);
       if (request.method === 'GET' && action === 'memory') return Response.json(await this.read(serverId, Number(url.searchParams.get('user_id'))));
+      if (request.method === 'GET' && action === 'conversation') {
+        return Response.json(this.readConversation(serverId, Number(url.searchParams.get('user_id'))));
+      }
+      if (request.method === 'DELETE' && action === 'conversation') {
+        // 对话清空按 body 里的 user_id 鉴权，与其它批量接口一致。
+        const body = await request.json<Record<string, unknown>>().catch(() => null);
+        this.clearConversation(serverId, Number(body?.user_id));
+        return Response.json({ success: true });
+      }
       if (request.method === 'DELETE' && action !== 'knowledge-batch') {
         const userId = Number(url.searchParams.get('user_id'));
         this.checkOwner(serverId, userId); this.revision(serverId, userId);
@@ -193,6 +270,10 @@ export class ServerMemoryStore {
       const body = await request.json<Record<string, unknown>>();
       const userId = Number(body.user_id);
       this.checkOwner(serverId, userId);
+      if (action === 'conversation-append') {
+        const revision = this.appendConversation(serverId, userId, { messages: body.messages });
+        return Response.json({ success: true, revision }, { status: 201 });
+      }
       if (action === 'task') {
         await this.enqueueMemory(serverId, userId, body.task as MemoryTask);
         return Response.json({ success: true });
@@ -282,5 +363,7 @@ export class ServerMemoryStore {
     this.db.exec('DELETE FROM agent_memory_state WHERE server_id = ?', serverId);
     this.db.exec('DELETE FROM agent_knowledge_meta WHERE server_id = ?', serverId);
     this.db.exec('DELETE FROM agent_pending_distillations WHERE server_id = ?', serverId);
+    this.db.exec('DELETE FROM agent_conversation_messages WHERE server_id = ?', serverId);
+    this.db.exec('DELETE FROM agent_conversation_state WHERE server_id = ?', serverId);
   }
 }

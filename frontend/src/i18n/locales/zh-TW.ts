@@ -574,6 +574,8 @@ export const zhTW = {
   'agent.modeAutoTooltip': 'Auto 模式：需確認的操作將在 3 秒後自動批准',
   'agent.newChat': '新增會話',
   'agent.newChatConfirm': '確定要開啟新增會話嗎？（將清除目前對話上下文）',
+  'agent.historyRestored': '已恢復上次對話記錄，可直接接著問。',
+  'agent.historyClearFailed': '清除歷史對話失敗，請稍後重試。',
   'agent.stopAndResend': '停止並重發',
   'agent.connectionLost': '連線中斷，正在恢復；任務可能仍在執行。',
   'agent.syncing': 'SSH 已恢復，正在同步 Agent 任務狀態…',

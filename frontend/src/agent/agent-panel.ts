@@ -17,6 +17,7 @@ import { getLocale, onLocaleChange, t, translateDocument } from '../i18n';
 import { confirmAction, notify } from '../ui-feedback';
 import { getTerminalFillCommand, normalizeCodeLanguage } from './code-actions';
 import { responseErrorMessage } from './response-errors';
+import { isConversationTranscript } from '../../../src/agent-conversation-schema';
 import { agentSessionDraftKey } from './session-draft';
 import {
   buildTerminalSelectionMessage,
@@ -147,6 +148,10 @@ export class AgentPanel {
   private memoryBatchDeleteBtn: HTMLButtonElement | null = null;
   private revealedSecretIds: Set<number> = new Set();
   private hasConfirmedSession: boolean = false;
+  /** 服务端持久化对话是否已成功载入；每台服务器只自动恢复一次，避免覆盖用户新开的话题。 */
+  private transcriptLoaded: boolean = false;
+  /** 本地草稿是否已经迁移到服务端对话（serverId 会在不同部署间冲突，因此按数据库身份迁移）。 */
+  private transcriptMigrated: boolean = false;
   private sessionMessages: Array<{
     role: string;
     content: string;
@@ -223,6 +228,7 @@ export class AgentPanel {
     } else if (this.isVisible && this.serverId) {
       void this.fetchServerMemory();
     }
+    void this.hydrateConversation();
   }
 
   setBeforeShowHandler(handler: () => void): void {
@@ -502,6 +508,7 @@ export class AgentPanel {
     if (this.serverId) {
       this.loadSessionDraft();
     }
+    void this.hydrateConversation();
   }
 
   private bindEvents(): void {
@@ -914,6 +921,25 @@ export class AgentPanel {
     this.clearStateSync();
     this.wsSend?.(JSON.stringify({ type: 'agent_reset' }));
     this.resetPanelState();
+    // 服务端对话同样清空，否则下次打开面板会把旧对话重新装回来。
+    void this.clearServerConversation();
+  }
+
+  /** 清空服务端持久化的可见对话；失败时提示用户，本地面板已重置。 */
+  private async clearServerConversation(): Promise<void> {
+    if (!this.serverId || !this.isLoggedIn) return;
+    this.transcriptLoaded = true;
+    try {
+      const res = await fetch(`/api/servers/${this.serverId}/conversation`, {
+        method: 'DELETE',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      if (!res.ok) notify(t('agent.historyClearFailed'), { variant: 'warning' });
+    } catch {
+      notify(t('agent.historyClearFailed'), { variant: 'warning' });
+    }
   }
 
   private resetPanelState(): void {
@@ -1989,6 +2015,36 @@ export class AgentPanel {
     return this.isLoggedIn && !this.disposed
       ? agentSessionDraftKey(this.githubId, this.serverId)
       : null;
+  }
+
+  /**
+   * 从服务端恢复该服务器的可见对话。
+   * 面板关闭、切换页面或重新连接后都能接续同一段对话；只回填空面板，不覆盖用户正在进行的输入。
+   * 本地中断草稿存在时优先保留草稿（它含未完成任务证据），仅把草稿迁移上云。
+   */
+  private async hydrateConversation(): Promise<void> {
+    if (this.disposed || !this.isLoggedIn || !this.serverId || this.transcriptLoaded) return;
+    if (this.sessionMessages.length > 0) return;
+    this.transcriptLoaded = true;
+    try {
+      const res = await fetch(`/api/servers/${this.serverId}/conversation`, { credentials: 'same-origin' });
+      if (!res.ok) return;
+      const transcript = (await res.json()) as unknown;
+      if (!isConversationTranscript(transcript)) return;
+      if (this.disposed || this.sessionMessages.length > 0 || !this.messagesEl) return;
+      const messages = transcript.messages.filter((message) => message.content.trim().length > 0);
+      if (messages.length === 0) return;
+      this.sessionMessages = messages.map((message) => ({ role: message.role, content: message.content }));
+      this.messagesEl.innerHTML = '';
+      let userCounter = 0;
+      for (const message of this.sessionMessages) {
+        const userIndex = message.role === 'user' ? userCounter++ : undefined;
+        this.appendMessage(message.role, message.content, { userIndex });
+      }
+      this.scrollToBottom();
+    } catch {
+      /* 离线或接口不可用时保持空面板，用户仍可正常提问 */
+    }
   }
 
   private loadSessionDraft(): void {

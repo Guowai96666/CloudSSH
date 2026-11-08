@@ -13,7 +13,8 @@ import { ResponsesClient, ResponsesError } from './responses-client';
 import type { TerminalContext } from './terminal-context';
 import { ToolExecutor } from './tool-executor';
 import { AGENT_TOOLS, parseToolArguments } from './tools';
-import type { AgentConfig, AgentMemoryProvider, AIConfig, ExecResult, ModelResponse, RunOutcome } from './types';
+import type { AgentConfig, AgentMemoryProvider, AIConfig, ConversationAppendInput, ExecResult,
+  ModelResponse, RunOutcome } from './types';
 
 const DEFAULT_CONFIG: AgentConfig = {
   maxIterations: 175, timeout: 300_000, inputTokenBudget: 64_000, maxOutputTokens: 8192,
@@ -58,6 +59,8 @@ export class AgentCore {
   private toolExecutor: ToolExecutor;
   private environment = '';
   private unifiedMemory: UnifiedServerMemory = { workLogs: [], knowledge: [] };
+  /** 本轮需要写入持久化对话的消息；非空时才落库，避免空转请求。 */
+  private persistedTurn: ConversationAppendInput[] = [];
 
   constructor(
     private terminalContext: TerminalContext,
@@ -108,9 +111,13 @@ export class AgentCore {
     ++this.runId;
     this.recovery = emptyAgentSessionState(this.runId);
     this.context = new AgentContext();
+    this.persistedTurn = [];
     this.state = { status: 'idle', iteration: 0 };
     this.boundConfig = null;
     this.environment = '';
+    // 「新对话」同时清空持久化记录，否则下一轮会把旧对话重新装回模型历史。
+    const cleared = this.memoryProvider?.clearConversation().catch(() => undefined);
+    if (cleared) this.waitUntil?.(cleared);
   }
 
   private emit(id: number, frame: Record<string, unknown>): void {
@@ -203,6 +210,9 @@ export class AgentCore {
     try {
       signal.throwIfAborted();
       if (typeof message !== 'string' || !message.trim() || message.length > 16_000) throw new ResponsesError('responses_input');
+      // 历史编辑必须保留原有记录，只有普通新轮次才把本轮问答落库。
+      this.persistedTurn = userIndex != null ? [] : [{ role: 'user', content: message }];
+      await this.restoreConversation(context, signal);
       context.beginTurn(message, userIndex);
       aiConfig = await abortable(this.fetchAIConfig(userId), signal);
       signal.throwIfAborted();
@@ -378,6 +388,7 @@ export class AgentCore {
       }
       // Only numeric metadata is logged; no credentials, terminal text, or provider error bodies.
       console.info('Agent Responses usage', { runId: id, outcome, ...totals });
+      this.persistConversation(finalText);
       if (aiConfig && context === this.context && signal.reason !== 'reset' && this.memoryProvider &&
         (didExecute || outcome === 'completed') && !shouldBypassDistillation(message)) {
         const promise = this.memoryProvider.enqueueMemory({ taskId: crypto.randomUUID(), goal: message,
@@ -387,6 +398,39 @@ export class AgentCore {
         this.waitUntil?.(promise);
       }
     }
+  }
+
+  /**
+   * 首次对话前把已持久化的可见对话装回模型历史。
+   * 读取失败只降级为“没有历史”，不得阻断本轮任务。
+   */
+  private async restoreConversation(context: AgentContext, signal: AbortSignal): Promise<void> {
+    if (context.hasRestoredTranscript()) return;
+    const provider = this.memoryProvider;
+    if (!provider) return;
+    const transcript = await abortable(
+      provider.loadConversation(signal).catch(() => null), signal);
+    signal.throwIfAborted();
+    context.restoreTranscript(transcript?.messages ?? []);
+  }
+
+  /**
+   * 把本轮问答写入持久化对话，供关闭面板后恢复。
+   * 用户消息在开始时就已登记；助手正文以最终文本为准，失败或空回复不写入。
+   */
+  private persistConversation(finalText: string): void {
+    if (!this.memoryProvider) return;
+    const assistant = finalText.trim();
+    const pending = [...this.persistedTurn];
+    this.persistedTurn = [];
+    if (!pending.length) return;
+    const messages: ConversationAppendInput[] = assistant
+      ? [...pending, { role: 'assistant', content: assistant }]
+      : pending;
+    const promise = this.memoryProvider.appendConversation(messages).catch(() => {
+      // 持久化失败不影响本轮结果；下一轮会重新写入新的问答。
+    });
+    this.waitUntil?.(promise);
   }
 
   private observe(context: AgentContext, locale: AgentLocale, timezone: string): void {

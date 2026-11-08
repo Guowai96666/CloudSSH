@@ -624,6 +624,8 @@ export const enUS: Record<keyof typeof zhCN, string> = {
   'agent.modeAutoTooltip': 'Auto mode: Operations requiring confirmation will be auto-approved in 3s',
   'agent.newChat': 'New chat',
   'agent.newChatConfirm': 'Start a new chat? (Current conversation context will be cleared)',
+  'agent.historyRestored': 'Previous conversation restored; keep going anytime.',
+  'agent.historyClearFailed': 'Failed to clear the saved conversation. Please retry later.',
   'agent.stopAndResend': 'Stop & Resend',
   'agent.connectionLost': 'Connection lost. Reconnecting; the task may still be running.',
   'agent.syncing': 'SSH restored. Synchronizing Agent task state…',

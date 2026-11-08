@@ -554,6 +554,40 @@ async function handleServersRoute(request: Request, url: URL, env: Env): Promise
     return new Response('Method Not Allowed', { status: 405 });
   }
 
+  // /api/servers/:id/conversation —— Agent 可见对话的读取、追加与清空
+  const conversationMatch = url.pathname.match(/^\/api\/servers\/(\d+)\/conversation$/);
+  if (conversationMatch) {
+    const serverId = conversationMatch[1];
+    if (request.method === 'GET') {
+      return stub.fetch(
+        new Request(`http://internal/internal/servers/${serverId}/conversation?user_id=${user.id}`, {
+          method: 'GET',
+        })
+      );
+    }
+    if (request.method === 'POST') {
+      // 只转发 role/content，不接受客户端提供的 user_id 覆盖。
+      const body = await request.json<{ messages?: unknown }>().catch(() => null);
+      return stub.fetch(
+        new Request(`http://internal/internal/servers/${serverId}/conversation`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_id: user.id, messages: body?.messages }),
+        })
+      );
+    }
+    if (request.method === 'DELETE') {
+      return stub.fetch(
+        new Request(`http://internal/internal/servers/${serverId}/conversation`, {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_id: user.id }),
+        })
+      );
+    }
+    return new Response('Method Not Allowed', { status: 405 });
+  }
+
   // /api/servers/:id/memory
   const memoryMatch = url.pathname.match(/^\/api\/servers\/(\d+)\/memory$/);
   if (memoryMatch) {

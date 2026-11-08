@@ -1,6 +1,7 @@
+import type { ConversationTranscript } from '../../agent-conversation-schema';
 import type { Env } from '../../types';
 import { ResponsesError } from './responses-client';
-import type { AgentMemoryProvider, UnifiedServerMemory } from './types';
+import type { AgentMemoryProvider, ConversationAppendInput, UnifiedServerMemory } from './types';
 
 /** The SSH session only reads memory and submits completed conversation for later summarization. */
 export function createAgentMemoryProvider(env: Env, githubId: string, userId: string, serverId: number): AgentMemoryProvider {
@@ -32,5 +33,11 @@ export function createAgentMemoryProvider(env: Env, githubId: string, userId: st
   return {
     fetchUnifiedMemory: async signal => await request(`/memory?user_id=${userId}`, undefined, signal) as UnifiedServerMemory,
     enqueueMemory: async task => { await request('/agent-memory', task); },
+    loadConversation: async signal =>
+      await request(`/conversation?user_id=${userId}`, undefined, signal) as ConversationTranscript,
+    appendConversation: async (messages: ConversationAppendInput[]) => {
+      await request('/conversation', { messages });
+    },
+    clearConversation: async () => { await request('/conversation', { reset: true }); },
   };
 }

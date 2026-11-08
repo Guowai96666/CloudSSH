@@ -529,6 +529,18 @@ export class UserDBDO {
         return this.memoryStore.handle(Number(agentMemoryMatch[1]), 'task', request);
       }
 
+      // /internal/servers/:id/conversation —— Agent 可见对话的持久化与恢复
+      const conversationMatch = path.match(/^\/internal\/servers\/(\d+)\/conversation$/);
+      if (conversationMatch) {
+        const serverId = parseInt(conversationMatch[1], 10);
+        if (request.method === 'GET') {
+          if (!url.searchParams.get('user_id')) return Response.json({ error: 'Missing user_id' }, { status: 400 });
+          return this.memoryStore.handle(serverId, 'conversation', request);
+        }
+        if (request.method === 'POST') return this.memoryStore.handle(serverId, 'conversation-append', request);
+        if (request.method === 'DELETE') return this.memoryStore.handle(serverId, 'conversation', request);
+      }
+
       // /internal/servers/:id/memory
       const memoryMatch = path.match(/^\/internal\/servers\/(\d+)\/memory$/);
       if (memoryMatch && request.method === 'GET') {
