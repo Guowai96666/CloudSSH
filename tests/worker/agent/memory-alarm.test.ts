@@ -121,6 +121,33 @@ describe('Server memory and background extraction', () => {
     expect(f.db.prepare('SELECT COUNT(*) AS n FROM agent_pending_distillations').get()).toEqual({ n: 0 });
   });
 
+  it('falls back to rule extraction when the upstream answers with plain prose', async () => {
+    const key = 'secret-prose-' + 'Z'.repeat(120);
+    const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+      if (String(url) !== 'https://llm.example.com/responses') return Response.json({ Status: 0, Answer: [] });
+      // 完全不遵守 json_schema 的中转站：只回中文自然语言。
+      const prose = '已记录本次运维。\n\n**目标**：部署 nginx\n**配置路径**：/etc/nginx/nginx.conf\n'
+        + `**凭据**：deploy_token = ${key}\n**端口**：8080\n根分区已清理，剩余 12G。`;
+      return Response.json(responseObject('summary', prose));
+    });
+    const due = Number((f.db.prepare('SELECT next_attempt_at FROM agent_pending_distillations').get() as { next_attempt_at: number }).next_attempt_at);
+    vi.setSystemTime(due);
+    const recovered = f.create();
+    await recovered.alarm();
+    const modelCalls = fetch.mock.calls.filter(call => String(call[0]) === 'https://llm.example.com/responses');
+    expect(modelCalls.length).toBeGreaterThanOrEqual(1);
+    const memory = await recovered.fetch(new Request('http://internal/internal/servers/1/memory?user_id=10'));
+    const body = await memory.json() as { workLogs: any[]; knowledge: any[] };
+    // workLog 可用；知识只收高置信模式，且不会把散文写进知识库。
+    expect(body.workLogs).toHaveLength(1);
+    expect(body.workLogs[0].title.length).toBeGreaterThan(0);
+    const values = body.knowledge.map((item: any) => item.value);
+    expect(values).toContain('/etc/nginx/nginx.conf');
+    expect(values).toContain('8080');
+    expect(body.knowledge.every((item: any) => typeof item.key === 'string' && item.key.length > 0)).toBe(true);
+    expect(f.db.prepare('SELECT COUNT(*) AS n FROM agent_pending_distillations').get()).toEqual({ n: 0 });
+  });
+
   it('retries at most three times after the first failure, then deletes the pending task', async () => {
     const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => Response.json({ error: { code: 'invalid_api_key' } }, { status: 401 }));
     // 入队时的内联尝试已占用一次 retries；之后每次到期再失败都会把 retries 推高，
