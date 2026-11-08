@@ -758,7 +758,8 @@ export class AgentPanel {
         }
         break;
       case 'memory_status':
-        notify(t('agent.memoryFailure'), { variant: 'warning' });
+        notify(t(msg.code === 'conversation_unpersisted' ? 'agent.historySaveFailed' : 'agent.memoryFailure'),
+          { variant: 'warning' });
         break;
       case 'memory_updated':
         // Cache invalidation is not task completion: a late log write must preserve interrupted drafts.

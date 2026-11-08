@@ -625,6 +625,7 @@ export const enUS: Record<keyof typeof zhCN, string> = {
   'agent.newChat': 'New chat',
   'agent.newChatConfirm': 'Start a new chat? (Current conversation context will be cleared)',
   'agent.historyRestored': 'Previous conversation restored; keep going anytime.',
+  'agent.historySaveFailed': 'This turn could not be saved; closing the panel will lose it.',
   'agent.historyClearFailed': 'Failed to clear the saved conversation. Please retry later.',
   'agent.stopAndResend': 'Stop & Resend',
   'agent.connectionLost': 'Connection lost. Reconnecting; the task may still be running.',

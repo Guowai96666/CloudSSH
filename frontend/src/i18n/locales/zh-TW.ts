@@ -575,6 +575,7 @@ export const zhTW = {
   'agent.newChat': '新增會話',
   'agent.newChatConfirm': '確定要開啟新增會話嗎？（將清除目前對話上下文）',
   'agent.historyRestored': '已恢復上次對話記錄，可直接接著問。',
+  'agent.historySaveFailed': '對話未能儲存到雲端，關閉面板後本輪記錄不會保留。',
   'agent.historyClearFailed': '清除歷史對話失敗，請稍後重試。',
   'agent.stopAndResend': '停止並重發',
   'agent.connectionLost': '連線中斷，正在恢復；任務可能仍在執行。',

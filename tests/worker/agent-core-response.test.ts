@@ -269,6 +269,35 @@ describe('AgentCore Responses delivery and context', () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
+  it('persists the visible turn through the conversation contract, not the distillation envelope', async () => {
+    const append = vi.fn(async (_messages: unknown[]) => {});
+    const memory = { fetchUnifiedMemory: async () => ({ workLogs: [], knowledge: [], revision: 0 }),
+      enqueueMemory: vi.fn(async () => {}),
+      loadConversation: async () => ({ messages: [], revision: 0 }),
+      appendConversation: append, clearConversation: vi.fn(async () => {}) };
+    const { agent, waits, frames } = setup({ memory });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(reply('done', 'Deployment completed.'));
+    await agent.handleAgentStart('1', '部署服务'); await Promise.all(waits);
+    expect(append).toHaveBeenCalledTimes(1);
+    expect(append.mock.calls[0][0]).toEqual([
+      { role: 'user', content: '部署服务' },
+      { role: 'assistant', content: 'Deployment completed.' },
+    ]);
+    expect(frames.some((frame: any) => frame.code === 'conversation_unpersisted')).toBe(false);
+  });
+
+  it('signals an unpersisted turn instead of swallowing the failure', async () => {
+    const memory = { fetchUnifiedMemory: async () => ({ workLogs: [], knowledge: [], revision: 0 }),
+      enqueueMemory: vi.fn(async () => {}),
+      loadConversation: async () => ({ messages: [], revision: 0 }),
+      appendConversation: vi.fn(async () => { throw new Error('storage down'); }),
+      clearConversation: vi.fn(async () => {}) };
+    const { agent, waits, frames } = setup({ memory });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(reply('done', 'ok'));
+    await agent.handleAgentStart('1', '检查状态'); await Promise.all(waits);
+    expect(frames.some((frame: any) => frame.code === 'conversation_unpersisted')).toBe(true);
+  });
+
   it('provides a previously saved full key to a later deployment task without relevance filtering', async () => {
     const key = 'deployment-secret-' + 'X'.repeat(1000);
     const priorKeys = Array.from({ length: 4 }, (_, i) => ({ id: i + 1, user_id: 1, server_id: 1,

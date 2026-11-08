@@ -427,8 +427,12 @@ export class AgentCore {
     const messages: ConversationAppendInput[] = assistant
       ? [...pending, { role: 'assistant', content: assistant }]
       : pending;
-    const promise = this.memoryProvider.appendConversation(messages).catch(() => {
-      // 持久化失败不影响本轮结果；下一轮会重新写入新的问答。
+    // 落库失败不阻断本轮结果，但必须留下可见信号：静默 catch 会让「关了就没」无从排查。
+    const provider = this.memoryProvider;
+    const promise = provider.appendConversation(messages).catch(error => {
+      console.warn('Agent conversation persist failed',
+        { status: error instanceof ResponsesError ? error.status : undefined });
+      this.emit(this.runId, { subType: 'memory_status', code: 'conversation_unpersisted' });
     });
     this.waitUntil?.(promise);
   }

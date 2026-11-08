@@ -574,6 +574,7 @@ export const zhCN = {
   'agent.newChat': '新建会话',
   'agent.newChatConfirm': '确定要开启新建会话吗？（将清空当前对话上下文）',
   'agent.historyRestored': '已恢复上次对话记录，可直接接着问。',
+  'agent.historySaveFailed': '对话未能保存到云端，关闭面板后本轮记录不会保留。',
   'agent.historyClearFailed': '清空历史对话失败，请稍后重试。',
   'agent.stopAndResend': '停止并重发',
   'agent.connectionLost': '连接中断，正在恢复；任务可能仍在执行。',
