@@ -61,6 +61,8 @@ export class AgentCore {
   private unifiedMemory: UnifiedServerMemory = { workLogs: [], knowledge: [] };
   /** 本轮需要写入持久化对话的消息；非空时才落库，避免空转请求。 */
   private persistedTurn: ConversationAppendInput[] = [];
+  /** 当前对话线程；「新建对话」会换成新线程，历史线程保持可打开。 */
+  private activeThreadId = '';
 
   constructor(
     private terminalContext: TerminalContext,
@@ -106,18 +108,44 @@ export class AgentCore {
     this.pauseTimeout();
   }
 
+  /**
+   * 「新建对话」：丢弃内存上下文并切换到一条新线程。
+   * 旧线程的记录保留在服务端，可随时从会话历史重新打开。
+   */
   resetSession(): void {
     this.agentAbort('reset');
     ++this.runId;
     this.recovery = emptyAgentSessionState(this.runId);
     this.context = new AgentContext();
     this.persistedTurn = [];
+    this.activeThreadId = '';
     this.state = { status: 'idle', iteration: 0 };
     this.boundConfig = null;
     this.environment = '';
-    // 「新对话」同时清空持久化记录，否则下一轮会把旧对话重新装回模型历史。
-    const cleared = this.memoryProvider?.clearConversation().catch(() => undefined);
-    if (cleared) this.waitUntil?.(cleared);
+    const provider = this.memoryProvider;
+    if (!provider) return;
+    const started = provider.createConversation()
+      .then(threadId => { this.activeThreadId = threadId; })
+      .catch(() => undefined);
+    this.waitUntil?.(started);
+  }
+
+  /** 把已有线程切成当前线程，并丢弃内存上下文以便按该线程重新恢复。 */
+  activateConversation(threadId: string): Promise<string> {
+    const provider = this.memoryProvider;
+    if (!provider) return Promise.resolve('');
+    const started = provider.activateConversation(threadId).then(() => {
+      this.agentAbort('thread_switch');
+      ++this.runId;
+      this.recovery = emptyAgentSessionState(this.runId);
+      this.context = new AgentContext();
+      this.persistedTurn = [];
+      this.activeThreadId = threadId;
+      this.state = { status: 'idle', iteration: 0 };
+      return threadId;
+    });
+    this.waitUntil?.(started.catch(() => undefined));
+    return started;
   }
 
   private emit(id: number, frame: Record<string, unknown>): void {
@@ -409,8 +437,9 @@ export class AgentCore {
     const provider = this.memoryProvider;
     if (!provider) return;
     const transcript = await abortable(
-      provider.loadConversation(signal).catch(() => null), signal);
+      provider.loadConversation(this.activeThreadId || undefined, signal).catch(() => null), signal);
     signal.throwIfAborted();
+    if (transcript?.thread_id) this.activeThreadId = transcript.thread_id;
     context.restoreTranscript(transcript?.messages ?? []);
   }
 
@@ -429,7 +458,9 @@ export class AgentCore {
       : pending;
     // 落库失败不阻断本轮结果，但必须留下可见信号：静默 catch 会让「关了就没」无从排查。
     const provider = this.memoryProvider;
-    const promise = provider.appendConversation(messages).catch(error => {
+    const promise = provider.appendConversation(messages, this.activeThreadId || undefined).then(threadId => {
+      if (threadId) this.activeThreadId = threadId;
+    }).catch(error => {
       console.warn('Agent conversation persist failed',
         { status: error instanceof ResponsesError ? error.status : undefined });
       this.emit(this.runId, { subType: 'memory_status', code: 'conversation_unpersisted' });

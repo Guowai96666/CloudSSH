@@ -2,8 +2,9 @@ import { expect, test, type Page } from './fixtures';
 import { mockAnonymousSession } from './helpers';
 
 /** 面板打开时会把服务端保存的对话拉回来；接口按方法显式 Mock。 */
-async function routeConversation(page: Page, transcript: { messages: unknown[]; revision: number }) {
-  await page.route('**/api/servers/1/conversation', async route => {
+async function routeConversation(page: Page, transcript: Record<string, unknown>) {
+  // 带 ?thread= 的读取同样要命中：用正则匹配路径前缀。
+  await page.route(/\/api\/servers\/1\/conversation(\?.*)?$/, async route => {
     if (route.request().method() === 'GET') {
       await route.fulfill({ json: transcript });
       return;
@@ -30,6 +31,11 @@ test('重新打开面板后恢复上次对话，模型上下文由服务端记�
   await mockAnonymousSession(page);
   await page.route('**/api/servers/1/memory', route => route.fulfill({ json: { workLogs: [], knowledge: [] } }));
   await routeConversation(page, {
+    thread_id: 'thread00000001',
+    title: '磁盘排查',
+    title_custom: false,
+    created_at: 1,
+    updated_at: 3,
     revision: 7,
     messages: [
       { seq: 1, role: 'user', content: '帮我看看磁盘使用', created_at: 1 },
@@ -62,10 +68,25 @@ test('重新打开面板后恢复上次对话，模型上下文由服务端记�
   await expect(messages).toHaveCount(4);
 });
 
-test('「新对话」清空服务端记录，重新打开不再恢复旧内容', async ({ page }) => {
+test('「新对话」开一条新线程，旧对话仍留在会话历史里', async ({ page }) => {
   await mockAnonymousSession(page);
   await page.route('**/api/servers/1/memory', route => route.fulfill({ json: { workLogs: [], knowledge: [] } }));
+  await page.route('**/api/servers/1/conversations', async route => {
+    if (route.request().method() === 'GET') {
+      await route.fulfill({ json: { threads: [
+        { thread_id: 'thread00000001', title: '旧话题内容', title_custom: false,
+          message_count: 1, preview: '旧回复', created_at: 1, updated_at: 2 },
+      ], active_thread_id: 'thread00000001' } });
+      return;
+    }
+    await route.fulfill({ json: { success: true } });
+  });
   await routeConversation(page, {
+    thread_id: 'thread00000001',
+    title: '旧话题内容',
+    title_custom: false,
+    created_at: 1,
+    updated_at: 2,
     revision: 3,
     messages: [{ seq: 1, role: 'user', content: '旧话题内容', created_at: 1 }],
   });
@@ -76,21 +97,56 @@ test('「新对话」清空服务端记录，重新打开不再恢复旧内容',
   await hydration;
   await expect(page.locator('#agent-messages .agent-message')).toHaveCount(1);
 
+  // 新对话只发送 agent_reset（服务端开新线程），不再发 DELETE 清空历史。
   let deleted = false;
-  await page.route('**/api/servers/1/conversation', async route => {
-    if (route.request().method() === 'DELETE') {
-      deleted = true;
-      await route.fulfill({ json: { success: true } });
-      return;
-    }
-    await route.fulfill({ json: { messages: [], revision: 0 } });
+  page.on('request', request => {
+    if (request.method() === 'DELETE' && request.url().endsWith('/api/servers/1/conversation')) deleted = true;
   });
   await page.evaluate(() => {
     const { panel } = (window as any).__conversation;
     panel.handleAgentFrame({ subType: 'reset_done' });
-    return (panel as any).clearServerConversation();
+    panel['resetPanelState']();
   });
-  expect(deleted).toBe(true);
+  const outbound = await page.evaluate(() => (window as any).__conversation.sent.map((frame: any) => frame.type));
+  expect(outbound).not.toContain('agent_thread_delete');
+  expect(deleted).toBe(false);
+});
+
+test('会话历史抽屉列出线程并可打开其中一条', async ({ page }) => {
+  await mockAnonymousSession(page);
+  await page.route('**/api/servers/1/memory', route => route.fulfill({ json: { workLogs: [], knowledge: [] } }));
+  await page.route('**/api/servers/1/conversations', async route => {
+    if (route.request().method() === 'GET') {
+      await route.fulfill({ json: { threads: [
+        { thread_id: 'thread00000001', title: '磁盘排查', title_custom: false, message_count: 2,
+          preview: '根分区 92%', created_at: 1, updated_at: 3 },
+        { thread_id: 'thread00000002', title: '部署 Nginx', title_custom: true, message_count: 4,
+          preview: '服务已启动', created_at: 2, updated_at: 4 },
+      ], active_thread_id: 'thread00000002' } });
+      return;
+    }
+    await route.fulfill({ json: { success: true } });
+  });
+  await routeConversation(page, {
+    thread_id: 'thread00000002', title: '部署 Nginx', title_custom: true,
+    created_at: 2, updated_at: 4, revision: 5, messages: [],
+  });
+  const hydration = page.waitForResponse(response =>
+    response.url().endsWith('/api/servers/1/conversation') && response.request().method() === 'GET',
+  ).catch(() => null);
+  await mountPanel(page);
+  await hydration;
+
+  await page.locator('#agent-threads-btn').click();
+  const rows = page.locator('#agent-threads-content .agent-thread-row');
+  await expect(rows).toHaveCount(2);
+  await expect(rows.nth(0)).toContainText('磁盘排查');
+  await expect(rows.nth(1)).toContainText('部署 Nginx');
+
+  await rows.nth(0).click();
+  const outbound = await page.evaluate(() => (window as any).__conversation.sent
+    .filter((frame: any) => frame.type === 'agent_thread_open').map((frame: any) => frame.threadId));
+  expect(outbound).toEqual(['thread00000001']);
 });
 
 test('服务端对话为空或接口失败时保持空面板，不阻塞提问', async ({ page }) => {

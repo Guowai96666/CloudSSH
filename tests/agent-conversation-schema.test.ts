@@ -2,10 +2,15 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   CONVERSATION_MESSAGE_MAX_BYTES,
   CONVERSATION_MESSAGE_MAX_CHARS,
+  CONVERSATION_TITLE_MAX_CHARS,
   MAX_CONVERSATION_APPEND,
+  deriveConversationTitle,
+  isConversationThreadList,
   isConversationTranscript,
+  isValidThreadId,
   normalizeConversationAppendInput,
   normalizeConversationMessageInput,
+  normalizeConversationTitleInput,
 } from '../src/agent-conversation-schema';
 
 class MemoryStorage implements Storage {
@@ -107,14 +112,57 @@ describe('Agent conversation append batches', () => {
   });
 });
 
+describe('Conversation thread helpers', () => {
+  it('accepts only safe thread ids', () => {
+    expect(isValidThreadId('abc12345')).toBe(true);
+    expect(isValidThreadId('a-b_c-1234')).toBe(true);
+    for (const value of ['', 'short', 'has space here', 'bad/slash/1234', null, 1]) {
+      expect(isValidThreadId(value)).toBe(false);
+    }
+  });
+
+  it('derives a single-line bounded title from the first user message', () => {
+    expect(deriveConversationTitle('  检查\n磁盘   使用情况  ')).toBe('检查 磁盘 使用情况');
+    expect(deriveConversationTitle('')).toBe('新对话');
+    const long = 'a'.repeat(CONVERSATION_TITLE_MAX_CHARS + 10);
+    const title = deriveConversationTitle(long);
+    expect([...title].length).toBe(CONVERSATION_TITLE_MAX_CHARS + 1);
+    expect(title.endsWith('…')).toBe(true);
+  });
+
+  it('normalizes a user-supplied rename title', () => {
+    expect(normalizeConversationTitleInput('  部署 排查  ')).toEqual({ ok: true, value: '部署 排查' });
+    expect(normalizeConversationTitleInput('   ')).toEqual({ ok: false, error: 'titleRequired' });
+    expect(normalizeConversationTitleInput(1)).toEqual({ ok: false, error: 'titleRequired' });
+    expect(normalizeConversationTitleInput('x'.repeat(CONVERSATION_TITLE_MAX_CHARS + 1)))
+      .toEqual({ ok: false, error: 'titleTooLong' });
+  });
+
+  it('guards the thread list shell', () => {
+    expect(isConversationThreadList({ threads: [], active_thread_id: null })).toBe(true);
+    expect(isConversationThreadList({ threads: [{ thread_id: 'a'.repeat(12), title: 't', message_count: 2 }] })).toBe(true);
+    for (const value of [null, {}, { threads: 'x' }, { threads: [{ title: 't' }] }]) {
+      expect(isConversationThreadList(value)).toBe(false);
+    }
+  });
+});
+
 describe('Conversation transcript guard', () => {
   it('accepts a well-formed transcript and rejects foreign shapes', () => {
     expect(isConversationTranscript({
+      thread_id: 'abc12345',
+      title: '磁盘排查',
+      title_custom: false,
       revision: 3,
+      created_at: 1,
+      updated_at: 2,
       messages: [{ seq: 1, role: 'user', content: 'hi', created_at: 1 }],
     })).toBe(true);
-    for (const value of [null, {}, { messages: 'x' }, { messages: [{ role: 'system', content: 'a' }] },
-      { messages: [{ role: 'user', content: 1 }] }]) {
+    for (const value of [null, {}, { messages: 'x' },
+      // 缺少线程 id 的旧外壳不再被接受：面板必须知道自己在哪条线程里。
+      { messages: [] },
+      { thread_id: 'abc12345', messages: [{ role: 'system', content: 'a' }] },
+      { thread_id: 'abc12345', messages: [{ role: 'user', content: 1 }] }]) {
       expect(isConversationTranscript(value)).toBe(false);
     }
   });

@@ -72,7 +72,8 @@ export const MEMORY_DISTILLATION_PROMPT = `请为用户的服务器运维会话�
 - 如果本轮延续提供的最近一条工作记录，输出 mode: update_latest 并融合前后背景；无关任务输出 create。没有实际工作则 workLog 为 null。
 - 将后续任务需要复用的配置、地址、路径、密码、Token、密钥等保存到 knowledge。凭据保留完整原值，不脱敏、不截断、不改写；包括用户已授权使用的现有配置。用户明确要求忘记时输出 delete。
 - 更新已有知识时复用相同 key；不要捏造会话里没有的信息。key 最多 64 字符，value 最多 16384 字符。
-- 返回符合 Schema 的单个 JSON 对象，不加 Markdown。没有新增或变化的知识时 knowledge 为 []。`;
+- 输出必须是单个 JSON 对象本身：不要使用 markdown 代码块围栏，不要任何解释性文字，第一个字符就是 {，最后一个字符就是 }。没有新增或变化的知识时 knowledge 为 []。
+- 字段形状固定为 {"workLog": null 或 {"mode":"create|update_latest","title":"...","summary":"..."}, "knowledge":[{"action":"set|delete","category":"credential|config|rule|note","key":"...","value":"..."}]}。`;
 
 export function shouldBypassDistillation(message: string): boolean {
   return /^[\s\p{P}]*(?:你好|您好|hi|hello|hey|在吗|在嗎|早上好|晚上好|test|ping)[\s\p{P}]*$/iu.test(message);

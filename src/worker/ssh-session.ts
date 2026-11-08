@@ -239,6 +239,8 @@ export class SSHSession {
   // Agent integration
   private terminalContext: TerminalContext = new TerminalContext();
   private agentCore: AgentCore | null = null;
+  /** 同一 provider 也供控制消息读取会话历史。 */
+  private agentMemoryProvider: AgentMemoryProvider | undefined;
   private activeExecChannels: Map<number, AgentExecChannel> = new Map();
   private directTcpipStreams: Map<number, DirectTcpipStream> = new Map();
   private pendingDirectTcpip: Map<
@@ -3025,6 +3027,7 @@ export class SSHSession {
         );
       }
 
+      this.agentMemoryProvider = memoryProvider;
       this.agentCore = new AgentCore(
         this.terminalContext,
         (msg: any) => this.sendAgentFrame(msg),
@@ -3092,6 +3095,44 @@ export class SSHSession {
         type: 'agent_frame',
         subType: 'reset_done',
       });
+      return;
+    }
+    // 展开「会话历史」：只读列表，不改变 Agent 状态。
+    if (type === 'agent_threads_list') {
+      const provider = this.agentMemoryProvider;
+      if (!provider) {
+        this.sendAgentFrame({ type: 'agent_frame', subType: 'threads', threads: [] });
+        return;
+      }
+      void provider.listConversations().then(list => {
+        this.sendAgentFrame({ type: 'agent_frame', subType: 'threads', threads: list.threads,
+          activeThreadId: list.active_thread_id });
+      }).catch(() => {
+        this.sendAgentFrame({ type: 'agent_frame', subType: 'threads', threads: [] });
+      });
+      return;
+    }
+    // 打开一条历史线程：切换当前线程并丢弃旧内存上下文，下一轮按该线程恢复。
+    if (type === 'agent_thread_open') {
+      const threadId = typeof msg.threadId === 'string' ? msg.threadId : '';
+      if (!/^[A-Za-z0-9_-]{8,64}$/.test(threadId)) return;
+      this.finishAgentConfirmation(false);
+      void this.agentCore?.activateConversation(threadId).then(() => {
+        this.sendAgentFrame({ type: 'agent_frame', subType: 'thread_opened', threadId });
+      }).catch(() => {
+        this.sendAgentFrame({ type: 'agent_frame', subType: 'error', code: 'agent_thread_open' });
+      });
+      return;
+    }
+    // 删除一条历史线程（会话历史里的单条删除）。
+    if (type === 'agent_thread_delete') {
+      const threadId = typeof msg.threadId === 'string' ? msg.threadId : '';
+      if (!/^[A-Za-z0-9_-]{8,64}$/.test(threadId)) return;
+      const provider = this.agentMemoryProvider;
+      if (!provider) return;
+      void provider.deleteConversation(threadId)
+        .then(() => this.sendAgentFrame({ type: 'agent_frame', subType: 'thread_deleted', threadId }))
+        .catch(() => this.sendAgentFrame({ type: 'agent_frame', subType: 'error', code: 'agent_thread_delete' }));
       return;
     }
   }

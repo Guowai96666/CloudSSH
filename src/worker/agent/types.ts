@@ -1,5 +1,5 @@
 // Native, stateless Responses items and the small server-memory contract.
-import type { ConversationTranscript } from '../../agent-conversation-schema';
+import type { ConversationThreadList, ConversationTranscript } from '../../agent-conversation-schema';
 import type {
   KnowledgeAction,
   KnowledgeCategory,
@@ -10,7 +10,9 @@ import type {
 } from '../../server-memory-schema';
 
 export type { ServerWorkLog, ServerKnowledgeItem, UnifiedServerMemory, KnowledgeCategory, WorkLogMode, KnowledgeAction };
-export type { ConversationTranscript, ConversationMessage } from '../../agent-conversation-schema';
+export type {
+  ConversationMessage, ConversationThreadList, ConversationThreadSummary, ConversationTranscript,
+} from '../../agent-conversation-schema';
 
 export interface ResponseFunctionCall {
   type: 'function_call';
@@ -140,16 +142,30 @@ export interface AgentMemoryBatch {
 export interface AgentMemoryProvider {
   fetchUnifiedMemory(signal?: AbortSignal): Promise<UnifiedServerMemory>;
   enqueueMemory(task: MemoryTask): Promise<void>;
-  /** 读取该服务器已持久化的可见对话，用于面板重开后恢复上下文。 */
-  loadConversation(signal?: AbortSignal): Promise<ConversationTranscript>;
-  /** 追加本轮可见对话；失败必须由调用方降级，不得中断任务。 */
-  appendConversation(messages: ConversationAppendInput[]): Promise<void>;
-  /** 「新对话」时清空服务端对话记录。 */
-  clearConversation(): Promise<void>;
+  /** 读取一条线程的可见对话；省略 threadId 时读当前线程，用于面板重开后恢复上下文。 */
+  loadConversation(threadId?: string, signal?: AbortSignal): Promise<ConversationTranscript>;
+  /** 追加本轮可见对话到指定线程；失败必须由调用方降级，不得中断任务。 */
+  appendConversation(messages: ConversationAppendInput[], threadId?: string): Promise<string | undefined>;
+  /** 会话历史列表。 */
+  listConversations(signal?: AbortSignal): Promise<ConversationThreadList>;
+  /** 新建线程并设为当前线程。 */
+  createConversation(title?: string): Promise<string>;
+  /** 把已有线程切为当前线程（打开历史会话）。 */
+  activateConversation(threadId: string): Promise<void>;
+  /** 重命名线程。 */
+  renameConversation(input: ConversationRenameInput): Promise<void>;
+  /** 删除线程；省略 threadId 时清空全部线程。 */
+  deleteConversation(threadId?: string): Promise<void>;
 }
 
 /** 一条待持久化的可见对话消息。 */
 export interface ConversationAppendInput {
   role: 'user' | 'assistant';
   content: string;
+}
+
+/** 重命名线程的入参。 */
+export interface ConversationRenameInput {
+  thread_id: string;
+  title: string;
 }

@@ -2,6 +2,7 @@ import { CONSECUTIVE_TASK_WINDOW_MS, normalizeKnowledgeInput, normalizeWorkLogIn
   type UnifiedServerMemory } from '../../server-memory-schema';
 import { resolveAIModelBudgets } from '../../ai-model-policy';
 import { observation } from './context';
+import { parseStructuredReply } from './json-reply';
 import { formatServerMemoryForPrompt, MEMORY_DISTILLATION_PROMPT, MEMORY_FORMAT } from './prompt';
 import { ResponsesClient, ResponsesError } from './responses-client';
 import type { AgentMemoryBatch, AIConfig, MemoryTask } from './types';
@@ -18,9 +19,9 @@ export async function distillMemory(config: AIConfig, task: MemoryTask, memory: 
     input: [observation('conversation to remember', input)], text: { format: MEMORY_FORMAT },
     reasoning: { effort: 'low' }, max_output_tokens: Math.min(resolveAIModelBudgets(config).max_output_tokens, 8192) }, signal);
   signal.throwIfAborted();
-  let value: Record<string, unknown>;
-  try { value = JSON.parse(response.text); }
-  catch { throw new ResponsesError('responses_schema'); }
+  // 兼容忽略 json_schema 的上游：从 markdown 围栏或正文里取平衡 JSON 对象。
+  const value = parseStructuredReply(response.text);
+  if (!value) throw new ResponsesError('responses_schema');
   if (!value || !Object.hasOwn(value, 'workLog') || !Array.isArray(value.knowledge) || value.knowledge.length > 100) {
     throw new ResponsesError('responses_schema');
   }

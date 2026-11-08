@@ -17,7 +17,9 @@ import { getLocale, onLocaleChange, t, translateDocument } from '../i18n';
 import { confirmAction, notify } from '../ui-feedback';
 import { getTerminalFillCommand, normalizeCodeLanguage } from './code-actions';
 import { responseErrorMessage } from './response-errors';
-import { isConversationTranscript } from '../../../src/agent-conversation-schema';
+import {
+  isConversationThreadList, isConversationTranscript, type ConversationThreadSummary,
+} from '../../../src/agent-conversation-schema';
 import { agentSessionDraftKey } from './session-draft';
 import {
   buildTerminalSelectionMessage,
@@ -135,6 +137,12 @@ export class AgentPanel {
   private selectedKnowledgeIds: Set<number> = new Set();
   private collapsedDateGroups: Set<string> = new Set(['older']);
   private memoryDrawerEl: HTMLElement | null = null;
+  private isThreadsDrawerOpen: boolean = false;
+  private threadsDrawerEl: HTMLElement | null = null;
+  private threadsContentEl: HTMLElement | null = null;
+  private threadsCountEl: HTMLElement | null = null;
+  private conversationThreads: ConversationThreadSummary[] = [];
+  private activeThreadId: string = '';
   private memoryTabWorkLogBtn: HTMLElement | null = null;
   private memoryTabKnowledgeBtn: HTMLElement | null = null;
   private memoryContentEl: HTMLElement | null = null;
@@ -376,6 +384,9 @@ export class AgentPanel {
                 <span class="agent-mode-btn-text" data-i18n="agent.modeAutoShort">${t('agent.modeAutoShort')}</span>
               </button>
             </div>
+            <button id="agent-threads-btn" class="agent-header-btn" data-i18n-title="agent.threadsTitle" title="${t('agent.threadsTitle')}" aria-label="${t('agent.threadsTitle')}" aria-expanded="false" aria-haspopup="dialog">
+              <span class="material-symbols-outlined" aria-hidden="true">forum</span>
+            </button>
             <button id="agent-new-chat-btn" class="agent-header-btn" data-i18n-title="agent.newChat" title="${t('agent.newChat')}" aria-label="${t('agent.newChat')}">
               <span class="material-symbols-outlined" aria-hidden="true">add</span>
             </button>
@@ -395,6 +406,19 @@ export class AgentPanel {
             <button type="button" data-agent-retry class="cyber-button px-2 py-1" data-i18n="agent.retrySync"></button>
             <button type="button" data-agent-force-stop class="cyber-button px-2 py-1" data-i18n="agent.stopCurrentTask"></button>
           </div>
+        </div>
+        <div id="agent-threads-drawer" class="agent-memory-drawer hidden flex flex-col bg-[var(--bg)] absolute inset-x-0 top-12 bottom-0 z-20 overflow-hidden">
+          <div class="flex items-center justify-between px-3 py-2 border-b border-[var(--border)] bg-[var(--bg-elevated)] shrink-0">
+            <div class="flex items-center gap-1.5 min-w-0">
+              <span class="material-symbols-outlined text-[var(--accent-secondary)]" style="font-size: 16px;">forum</span>
+              <span class="text-xs font-bold text-primary truncate" data-i18n="agent.threadsHeader">会话历史</span>
+              <span id="agent-threads-count" class="text-[11px] text-muted font-code shrink-0"></span>
+            </div>
+            <button id="agent-threads-close-btn" type="button" class="panel-close-btn" data-i18n-title="agent.close" title="关闭">
+              <span class="material-symbols-outlined">close</span>
+            </button>
+          </div>
+          <div id="agent-threads-content" class="flex-1 overflow-y-auto p-2 space-y-2 custom-scrollbar text-[11px]"></div>
         </div>
         <div id="agent-memory-drawer" class="agent-memory-drawer hidden flex flex-col bg-[var(--bg)] absolute inset-x-0 top-12 bottom-0 z-20 overflow-hidden">
           <div class="flex items-center justify-between px-3 py-2 border-b border-[var(--border)] bg-[var(--bg-elevated)] shrink-0">
@@ -492,6 +516,9 @@ export class AgentPanel {
     this.inputEl = this.panelEl.querySelector('#agent-input') as HTMLTextAreaElement;
     this.sendBtn = this.panelEl.querySelector('#agent-send-btn');
     this.memoryDrawerEl = this.panelEl.querySelector('#agent-memory-drawer');
+    this.threadsDrawerEl = this.panelEl.querySelector('#agent-threads-drawer');
+    this.threadsContentEl = this.panelEl.querySelector('#agent-threads-content');
+    this.threadsCountEl = this.panelEl.querySelector('#agent-threads-count');
     this.memoryTabWorkLogBtn = this.panelEl.querySelector('#agent-tab-work-log');
     this.memoryTabKnowledgeBtn = this.panelEl.querySelector('#agent-tab-knowledge');
     this.memoryContentEl = this.panelEl.querySelector('#agent-memory-content');
@@ -524,8 +551,10 @@ export class AgentPanel {
     this.panelEl?.querySelector('[data-agent-force-stop]')?.addEventListener('click', () => this.handleStop());
     this.panelEl?.querySelector('#agent-close-btn')?.addEventListener('click', () => this.hide());
     this.panelEl?.querySelector('#agent-new-chat-btn')?.addEventListener('click', () => void this.handleNewChat());
+    this.panelEl?.querySelector('#agent-threads-btn')?.addEventListener('click', () => this.toggleThreadsDrawer());
     this.panelEl?.querySelector('#agent-memory-btn')?.addEventListener('click', () => this.toggleMemoryDrawer());
     this.panelEl?.querySelector('#agent-memory-close-btn')?.addEventListener('click', () => this.closeMemoryDrawer());
+    this.panelEl?.querySelector('#agent-threads-close-btn')?.addEventListener('click', () => this.closeThreadsDrawer());
     this.memoryTabWorkLogBtn?.addEventListener('click', () => this.switchMemoryTab('workLog'));
     this.memoryTabKnowledgeBtn?.addEventListener('click', () => this.switchMemoryTab('knowledge'));
     this.memoryAddBtn?.addEventListener('click', () => this.toggleAddKnowledgeForm());
@@ -761,6 +790,20 @@ export class AgentPanel {
         notify(t(msg.code === 'conversation_unpersisted' ? 'agent.historySaveFailed' : 'agent.memoryFailure'),
           { variant: 'warning' });
         break;
+      case 'threads':
+        if (Array.isArray(msg.threads)) {
+          this.conversationThreads = msg.threads;
+          if (typeof msg.activeThreadId === 'string' && msg.activeThreadId) this.activeThreadId = msg.activeThreadId;
+          this.renderThreads();
+        }
+        break;
+      case 'thread_deleted':
+        if (typeof msg.threadId === 'string') this.removeThreadRow(msg.threadId);
+        break;
+      case 'thread_opened':
+        if (typeof msg.threadId === 'string') this.activeThreadId = msg.threadId;
+        this.renderThreads();
+        break;
       case 'memory_updated':
         // Cache invalidation is not task completion: a late log write must preserve interrupted drafts.
         if (this.serverId) {
@@ -920,27 +963,11 @@ export class AgentPanel {
 
     if (this.disposed || this.connection !== 'online') return;
     this.clearStateSync();
+    this.activeThreadId = '';
+    // 服务端开一条新线程，旧对话完整保留在「会话历史」里。
     this.wsSend?.(JSON.stringify({ type: 'agent_reset' }));
     this.resetPanelState();
-    // 服务端对话同样清空，否则下次打开面板会把旧对话重新装回来。
-    void this.clearServerConversation();
-  }
-
-  /** 清空服务端持久化的可见对话；失败时提示用户，本地面板已重置。 */
-  private async clearServerConversation(): Promise<void> {
-    if (!this.serverId || !this.isLoggedIn) return;
-    this.transcriptLoaded = true;
-    try {
-      const res = await fetch(`/api/servers/${this.serverId}/conversation`, {
-        method: 'DELETE',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: '{}',
-      });
-      if (!res.ok) notify(t('agent.historyClearFailed'), { variant: 'warning' });
-    } catch {
-      notify(t('agent.historyClearFailed'), { variant: 'warning' });
-    }
+    void this.refreshThreads();
   }
 
   private resetPanelState(): void {
@@ -2023,16 +2050,19 @@ export class AgentPanel {
    * 面板关闭、切换页面或重新连接后都能接续同一段对话；只回填空面板，不覆盖用户正在进行的输入。
    * 本地中断草稿存在时优先保留草稿（它含未完成任务证据），仅把草稿迁移上云。
    */
-  private async hydrateConversation(): Promise<void> {
-    if (this.disposed || !this.isLoggedIn || !this.serverId || this.transcriptLoaded) return;
+  private async hydrateConversation(threadId?: string, force = false): Promise<void> {
+    if (this.disposed || !this.isLoggedIn || !this.serverId) return;
+    if (!force && this.transcriptLoaded) return;
     if (this.sessionMessages.length > 0) return;
-    this.transcriptLoaded = true;
+    if (!force) this.transcriptLoaded = true;
     try {
-      const res = await fetch(`/api/servers/${this.serverId}/conversation`, { credentials: 'same-origin' });
+      const query = threadId ? `?thread=${encodeURIComponent(threadId)}` : '';
+      const res = await fetch(`/api/servers/${this.serverId}/conversation${query}`, { credentials: 'same-origin' });
       if (!res.ok) return;
       const transcript = (await res.json()) as unknown;
       if (!isConversationTranscript(transcript)) return;
       if (this.disposed || this.sessionMessages.length > 0 || !this.messagesEl) return;
+      if (transcript.thread_id) this.activeThreadId = transcript.thread_id;
       const messages = transcript.messages.filter((message) => message.content.trim().length > 0);
       if (messages.length === 0) return;
       this.sessionMessages = messages.map((message) => ({ role: message.role, content: message.content }));
@@ -2154,6 +2184,138 @@ export class AgentPanel {
   }
 
   // ==================== Server Unified Memory Management ====================
+
+  toggleThreadsDrawer(): void {
+    if (this.isThreadsDrawerOpen) this.closeThreadsDrawer();
+    else this.openThreadsDrawer();
+  }
+
+  openThreadsDrawer(): void {
+    this.isThreadsDrawerOpen = true;
+    this.threadsDrawerEl?.classList.remove('hidden');
+    const btn = this.panelEl?.querySelector('#agent-threads-btn');
+    if (btn) btn.setAttribute('aria-expanded', 'true');
+    void this.refreshThreads();
+  }
+
+  closeThreadsDrawer(): void {
+    this.isThreadsDrawerOpen = false;
+    this.threadsDrawerEl?.classList.add('hidden');
+    const btn = this.panelEl?.querySelector('#agent-threads-btn');
+    if (btn) btn.setAttribute('aria-expanded', 'false');
+  }
+
+  /** 拉取会话历史列表（服务端持久化，跨面板关闭与页面刷新都保留）。 */
+  private async refreshThreads(): Promise<void> {
+    if (!this.serverId || !this.isLoggedIn) return;
+    try {
+      const res = await fetch(`/api/servers/${this.serverId}/conversations`, { credentials: 'same-origin' });
+      if (!res.ok) return;
+      const list = (await res.json()) as unknown;
+      if (!isConversationThreadList(list)) return;
+      this.conversationThreads = [...list.threads];
+      if (list.active_thread_id) this.activeThreadId = list.active_thread_id;
+    } catch {
+      this.conversationThreads = [];
+    }
+    this.renderThreads();
+  }
+
+  private renderThreads(): void {
+    if (!this.threadsContentEl) return;
+    if (this.threadsCountEl) {
+      this.threadsCountEl.textContent = this.serverId ? `(${this.conversationThreads.length})` : '';
+    }
+    if (!this.serverId) {
+      this.threadsContentEl.innerHTML = `<div class="p-4 text-center text-muted">${escapeHtml(t('agent.memoryDirectNotice'))}</div>`;
+      return;
+    }
+    if (this.conversationThreads.length === 0) {
+      this.threadsContentEl.innerHTML = `<div class="p-4 text-center text-muted">${escapeHtml(t('agent.threadsEmpty'))}</div>`;
+      return;
+    }
+    const locale = getLocale();
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const active = this.activeThreadId || this.conversationThreads[0]?.thread_id;
+    this.threadsContentEl.innerHTML = this.conversationThreads.map((thread) => {
+      const isActive = thread.thread_id === active;
+      const time = formatTimestampWithRelative(thread.updated_at, Date.now(), locale, tz);
+      return `
+        <div class="agent-thread-row p-2.5 rounded border ${isActive
+          ? 'border-[var(--accent)] bg-[var(--bg-hover)]'
+          : 'border-[var(--border)] bg-[var(--bg-elevated)]'} flex flex-col gap-1 cursor-pointer"
+          data-thread-id="${escapeHtml(thread.thread_id)}" role="button" tabindex="0">
+          <div class="flex items-center justify-between gap-2">
+            <span class="font-bold text-primary truncate" title="${escapeHtml(thread.title)}">${escapeHtml(thread.title)}</span>
+            <button type="button" class="agent-thread-delete text-muted hover:text-error shrink-0 cursor-pointer"
+              data-thread-id="${escapeHtml(thread.thread_id)}" title="${escapeHtml(t('common.delete'))}">
+              <span class="material-symbols-outlined text-[15px]">delete</span>
+            </button>
+          </div>
+          <div class="flex items-center gap-2 text-[10px] text-muted">
+            <span class="font-code shrink-0">${escapeHtml(time)}</span>
+            <span class="shrink-0">·</span>
+            <span class="shrink-0">${thread.message_count} ${escapeHtml(t('agent.threadMessages'))}</span>
+            ${isActive ? `<span class="ml-auto text-[var(--accent)] shrink-0">${escapeHtml(t('agent.threadActive'))}</span>` : ''}
+          </div>
+          ${thread.preview ? `<div class="text-muted truncate" title="${escapeHtml(thread.preview)}">${escapeHtml(thread.preview)}</div>` : ''}
+        </div>
+      `;
+    }).join('');
+
+    this.threadsContentEl.querySelectorAll<HTMLElement>('.agent-thread-row').forEach((row) => {
+      const open = () => void this.openThread(row.dataset.threadId ?? '');
+      row.addEventListener('click', (event) => {
+        if ((event.target as HTMLElement).closest('.agent-thread-delete')) return;
+        open();
+      });
+      row.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); }
+      });
+    });
+    this.threadsContentEl.querySelectorAll<HTMLButtonElement>('.agent-thread-delete').forEach((btn) => {
+      btn.addEventListener('click', async (event) => {
+        event.stopPropagation();
+        const threadId = btn.dataset.threadId ?? '';
+        if (!threadId) return;
+        const ok = await confirmAction({
+          title: t('agent.threadDelete'),
+          message: t('agent.threadDeleteConfirm'),
+          variant: 'danger',
+        });
+        if (!ok) return;
+        this.wsSend?.(JSON.stringify({ type: 'agent_thread_delete', threadId }));
+      });
+    });
+  }
+
+  /** 打开一条历史会话：切换服务端当前线程并把消息回填到面板。 */
+  private async openThread(threadId: string): Promise<void> {
+    if (!threadId || !this.serverId) return;
+    if (this.isAgentRunning) {
+      notify(t('agent.threadSwitchWhileRunning'), { variant: 'warning' });
+      return;
+    }
+    this.wsSend?.(JSON.stringify({ type: 'agent_thread_open', threadId }));
+    this.activeThreadId = threadId;
+    this.sessionMessages = [];
+    if (this.messagesEl) this.messagesEl.innerHTML = '';
+    this.transcriptLoaded = true;
+    this.clearSessionDraft();
+    this.closeThreadsDrawer();
+    await this.hydrateConversation(threadId, true);
+    this.renderThreads();
+  }
+
+  private removeThreadRow(threadId: string): void {
+    this.conversationThreads = this.conversationThreads.filter((thread) => thread.thread_id !== threadId);
+    if (this.activeThreadId === threadId) {
+      this.activeThreadId = '';
+      this.sessionMessages = [];
+      if (this.messagesEl) this.messagesEl.innerHTML = '';
+    }
+    this.renderThreads();
+  }
 
   toggleMemoryDrawer(): void {
     if (this.isMemoryDrawerOpen) {

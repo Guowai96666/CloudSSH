@@ -160,6 +160,23 @@ export class UserDBDO {
     await this.memoryRun;
   }
 
+  /**
+   * 立刻消费一条待蒸馏任务（与 alarm 共用 single-flight 守卫）。
+   * 失败时 processMemoryTask 已经把行交给 retryTask，Alarm 继续兜底。
+   */
+  private kickMemoryTask(): void {
+    if (this.memoryRun) {
+      // 已有内联执行在跑：把本轮请求也串进去，避免在途任务被后面的 Alarm 抢走。
+      this.memoryRun = this.memoryRun.then(() => this.processMemoryTask())
+        .catch(() => undefined)
+        .finally(() => { this.memoryRun = null; });
+      return;
+    }
+    this.memoryRun = this.processMemoryTask()
+      .catch(() => undefined)
+      .finally(() => { this.memoryRun = null; });
+  }
+
   private async processMemoryTask(): Promise<void> {
     const row = this.memoryStore.nextTask();
     await this.memoryStore.rearm();
@@ -180,7 +197,13 @@ export class UserDBDO {
         const batch = await distillMemory(config, task, memory, controller.signal);
         await this.memoryStore.saveBatch(row.server_id, row.user_id, batch, row, controller.signal);
       })()]);
-    } catch {
+    } catch (error) {
+      // 只记分类，不打印会话正文或凭据；否则蒸馏长期失败时线上完全不可见。
+      console.warn('Agent memory distillation failed', {
+        taskId: row.task_id, retries: row.retries,
+        reason: error instanceof ResponsesError ? error.code : 'unexpected',
+        status: error instanceof ResponsesError ? error.status : undefined,
+      });
       this.memoryStore.retryTask(row);
     } finally {
       clearTimeout(timer);
@@ -526,10 +549,13 @@ export class UserDBDO {
 
       const agentMemoryMatch = path.match(/^\/internal\/servers\/(\d+)\/agent-memory$/);
       if (agentMemoryMatch && request.method === 'POST') {
-        return this.memoryStore.handle(Number(agentMemoryMatch[1]), 'task', request);
+        const response = await this.memoryStore.handle(Number(agentMemoryMatch[1]), 'task', request);
+        // Alarm 在本实例上不保证立刻触发；同一请求内先跑一次，失败再交给 alarm 重试。
+        if (response.ok) this.kickMemoryTask();
+        return response;
       }
 
-      // /internal/servers/:id/conversation —— Agent 可见对话的持久化与恢复
+      // /internal/servers/:id/conversation —— Agent 可见对话的持久化与恢复（单条线程）
       const conversationMatch = path.match(/^\/internal\/servers\/(\d+)\/conversation$/);
       if (conversationMatch) {
         const serverId = parseInt(conversationMatch[1], 10);
@@ -539,6 +565,23 @@ export class UserDBDO {
         }
         if (request.method === 'POST') return this.memoryStore.handle(serverId, 'conversation-append', request);
         if (request.method === 'DELETE') return this.memoryStore.handle(serverId, 'conversation', request);
+      }
+
+      // /internal/servers/:id/conversations —— 会话历史（线程列表、新建、切换、重命名）
+      const conversationsMatch = path.match(/^\/internal\/servers\/(\d+)\/conversations$/);
+      if (conversationsMatch) {
+        const serverId = parseInt(conversationsMatch[1], 10);
+        if (request.method === 'GET') {
+          if (!url.searchParams.get('user_id')) return Response.json({ error: 'Missing user_id' }, { status: 400 });
+          return this.memoryStore.handle(serverId, 'conversations', request);
+        }
+        if (request.method === 'POST') {
+          const body = await request.json<{ action?: unknown }>().catch(() => null);
+          const action = body?.action === 'activate' ? 'conversation-activate'
+            : body?.action === 'rename' ? 'conversation-rename' : 'conversation-thread';
+          return this.memoryStore.handle(serverId, action,
+            new Request('http://internal/conversations', { method: 'POST', body: JSON.stringify(body) }));
+        }
       }
 
       // /internal/servers/:id/memory

@@ -1,19 +1,25 @@
 /**
- * Agent 对话记录（Conversation Transcript）
+ * Agent 对话线程（Conversation Threads）
  *
- * 与 server-memory-schema 的“工作历程 / 知识”分离：这里保存的是用户与 AI 助手的
- * 逐条可见对话，用于关闭面板、切换页面或重连之后恢复同一段对话上下文。
- * 只保存正文文本，不保存工具调用、终端快照或审批结果。
+ * 每台服务器可以有多条并行的对话线程：面板里的「新建对话」开一条新线程，
+ * 旧线程完整保留，可在「会话历史」里重新打开并继续同一段上下文。
+ *
+ * 与 server-memory-schema 的「工作历程 / 知识」分离：这里保存的是逐条可见问答，
+ * 那边保存的是从对话里提炼出的可复用结论。
  */
 
-/** 单个会话保留的最大消息条数；超出后丢弃最旧的消息。 */
+/** 单台服务器保留的线程数上限；超出后淘汰最久未活动的线程。 */
+export const MAX_CONVERSATION_THREADS = 50;
+/** 单个线程保留的消息条数上限；超出后丢弃最旧的消息。 */
 export const MAX_CONVERSATION_MESSAGES = 200;
 /** 单条消息正文上限（按 UTF-16 码点计），超出部分截断。 */
 export const CONVERSATION_MESSAGE_MAX_CHARS = 8_000;
+/** 单条消息正文的 UTF-8 字节上限。 */
+export const CONVERSATION_MESSAGE_MAX_BYTES = 32 * 1024;
 /** 一次追加请求允许携带的最大消息条数。 */
 export const MAX_CONVERSATION_APPEND = 40;
-/** 单条消息正文的 UTF-8 字节上限，避免一条超长消息撑爆存储。 */
-export const CONVERSATION_MESSAGE_MAX_BYTES = 32 * 1024;
+/** 线程标题上限（服务端自动生成，用户可重命名）。 */
+export const CONVERSATION_TITLE_MAX_CHARS = 60;
 /** 只接受这两种角色：用户提问与助手回答。 */
 export const CONVERSATION_ROLES = ['user', 'assistant'] as const;
 
@@ -27,15 +33,93 @@ export interface ConversationMessage {
 }
 
 export interface ConversationTranscript {
+  /** 线程标识；空线程也有稳定 id。 */
+  thread_id: string;
+  /** 线程标题（首条用户消息摘要），用户可重命名。 */
+  title: string;
+  title_custom: boolean;
   messages: ConversationMessage[];
-  /** 服务端单调递增的写入计数；客户端用它判断是否需要重新拉取。 */
+  /** 该线程的写入计数，客户端据此判断是否需要重新拉取。 */
   revision: number;
+  created_at: number;
+  updated_at: number;
+}
+
+/** 「会话历史」列表里的一行。 */
+export interface ConversationThreadSummary {
+  thread_id: string;
+  title: string;
+  title_custom: boolean;
+  message_count: number;
+  preview: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface ConversationThreadList {
+  threads: ConversationThreadSummary[];
+  /** 服务端建议的当前线程（最近活动的）；无线程时为 null。 */
+  active_thread_id: string | null;
 }
 
 const encoder = new TextEncoder();
 
 function utf8Bytes(text: string): number {
   return encoder.encode(text).length;
+}
+
+/** 线程 id 只接受 ASCII 安全字符，避免作为查询参数或存储键时被改写。 */
+export function isValidThreadId(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{8,64}$/.test(value);
+}
+
+/** 生成一个随机线程 id。 */
+export function newConversationThreadId(): string {
+  return crypto.randomUUID().replace(/-/g, '').slice(0, 24);
+}
+
+/**
+ * 从首条用户消息生成线程标题。
+ * @param message 原始消息正文。
+ * @returns 单行、截断到上限的标题；空输入返回兜底标题。
+ */
+export function deriveConversationTitle(message: string): string {
+  const single = message.replace(/\s+/g, ' ').trim();
+  if (!single) return '新对话';
+  const chars = [...single];
+  return chars.length > CONVERSATION_TITLE_MAX_CHARS
+    ? `${chars.slice(0, CONVERSATION_TITLE_MAX_CHARS).join('')}…`
+    : single;
+}
+
+/** 规范化用户提交的线程标题。 */
+export function normalizeConversationTitleInput(
+  value: unknown
+): { ok: true; value: string } | { ok: false; error: string } {
+  if (typeof value !== 'string') return { ok: false, error: 'titleRequired' };
+  const single = value.replace(/\s+/g, ' ').trim();
+  if (!single) return { ok: false, error: 'titleRequired' };
+  const chars = [...single];
+  if (chars.length > CONVERSATION_TITLE_MAX_CHARS) return { ok: false, error: 'titleTooLong' };
+  return { ok: true, value: single };
+}
+
+function clampContent(text: string): string {
+  const chars = [...text];
+  let content = chars.length > CONVERSATION_MESSAGE_MAX_CHARS
+    ? chars.slice(0, CONVERSATION_MESSAGE_MAX_CHARS).join('')
+    : text;
+  if (utf8Bytes(content) > CONVERSATION_MESSAGE_MAX_BYTES) {
+    let low = 0;
+    let high = content.length;
+    while (low < high) {
+      const mid = Math.ceil((low + high) / 2);
+      if (utf8Bytes(content.slice(0, mid)) <= CONVERSATION_MESSAGE_MAX_BYTES) low = mid;
+      else high = mid - 1;
+    }
+    content = content.slice(0, low);
+  }
+  return content;
 }
 
 /**
@@ -51,20 +135,7 @@ export function normalizeConversationMessageInput(
   if (typeof input.content !== 'string') return { ok: false, error: 'contentRequired' };
   const trimmed = input.content.trim();
   if (!trimmed) return { ok: false, error: 'contentRequired' };
-  const chars = [...trimmed];
-  let content = chars.length > CONVERSATION_MESSAGE_MAX_CHARS
-    ? chars.slice(0, CONVERSATION_MESSAGE_MAX_CHARS).join('')
-    : trimmed;
-  if (utf8Bytes(content) > CONVERSATION_MESSAGE_MAX_BYTES) {
-    let low = 0;
-    let high = content.length;
-    while (low < high) {
-      const mid = Math.ceil((low + high) / 2);
-      if (utf8Bytes(content.slice(0, mid)) <= CONVERSATION_MESSAGE_MAX_BYTES) low = mid;
-      else high = mid - 1;
-    }
-    content = content.slice(0, low);
-  }
+  const content = clampContent(trimmed);
   if (!content.trim()) return { ok: false, error: 'contentRequired' };
   return { ok: true, value: { role: input.role as ConversationRole, content } };
 }
@@ -95,7 +166,19 @@ export function isConversationTranscript(value: unknown): value is ConversationT
   if (!value || typeof value !== 'object') return false;
   const transcript = value as ConversationTranscript;
   if (!Array.isArray(transcript.messages)) return false;
+  if (typeof transcript.thread_id !== 'string' || !transcript.thread_id) return false;
   return transcript.messages.every(message => message && typeof message === 'object'
     && typeof message.content === 'string'
     && CONVERSATION_ROLES.includes(message.role));
+}
+
+/** 判断一个值是否是「会话历史」列表外壳。 */
+export function isConversationThreadList(value: unknown): value is ConversationThreadList {
+  if (!value || typeof value !== 'object') return false;
+  const list = value as ConversationThreadList;
+  return Array.isArray(list.threads) && list.threads.every(thread =>
+    thread && typeof thread === 'object'
+    && typeof thread.thread_id === 'string'
+    && typeof thread.title === 'string'
+    && typeof thread.message_count === 'number');
 }

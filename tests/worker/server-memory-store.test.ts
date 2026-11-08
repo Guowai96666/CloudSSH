@@ -32,6 +32,63 @@ beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(1_800_000_000_000); f = 
 afterEach(() => { f.db.close(); vi.useRealTimers(); });
 const task: MemoryTask = { taskId: 'task-1', goal: '部署', conversation: '配置和部署操作', locale: 'zh-CN', timezone: 'UTC' };
 
+describe('Agent conversation threads', () => {
+  const createThread = () => f.store.handle(1, 'conversation-thread',
+    new Request('http://internal/conversations', { method: 'POST', body: JSON.stringify({ user_id: 10 }) }));
+  const appendTo = (threadId: string, messages: unknown) => f.store.handle(1, 'conversation-append',
+    new Request('http://internal/conversation', { method: 'POST',
+      body: JSON.stringify({ user_id: 10, thread_id: threadId, messages }) }));
+  const list = () => f.store.handle(1, 'conversations',
+    new Request('http://internal/conversations?user_id=10', { method: 'GET' }));
+  const action = (body: Record<string, unknown>) => f.store.handle(1,
+    body.action === 'activate' ? 'conversation-activate' : 'conversation-rename',
+    new Request('http://internal/conversations', { method: 'POST', body: JSON.stringify({ user_id: 10, ...body }) }));
+
+  it('keeps separate threads so a new chat never destroys the old one', async () => {
+    const first = (await (await createThread()).json<{ thread_id: string }>()).thread_id;
+    await appendTo(first, [{ role: 'user', content: '第一段话题' }]);
+    const second = (await (await createThread()).json<{ thread_id: string }>()).thread_id;
+    expect(second).not.toBe(first);
+    await appendTo(second, [{ role: 'user', content: '第二段话题' }]);
+
+    const firstRead = await (await f.store.handle(1, 'conversation',
+      new Request(`http://internal/conversation?user_id=10&thread=${first}`, { method: 'GET' }))).json<{ messages: any[] }>();
+    expect(firstRead.messages.map(message => message.content)).toEqual(['第一段话题']);
+
+    const threads = await (await list()).json<{ threads: any[]; active_thread_id: string }>();
+    expect(threads.threads).toHaveLength(2);
+    expect(threads.active_thread_id).toBe(second);
+    expect(threads.threads.map(thread => thread.title)).toEqual(['第二段话题', '第一段话题']);
+  });
+
+  it('activates, renames and deletes a single thread', async () => {
+    const first = (await (await createThread()).json<{ thread_id: string }>()).thread_id;
+    await appendTo(first, [{ role: 'user', content: '待重命名' }]);
+    expect((await action({ action: 'rename', thread_id: first, title: '部署排查记录' })).status).toBe(200);
+    type ThreadList = { threads: any[]; active_thread_id: string };
+    let threads = await (await list()).json<ThreadList>();
+    expect(threads.threads[0]).toMatchObject({ title: '部署排查记录', title_custom: true });
+
+    expect((await action({ action: 'activate', thread_id: first })).status).toBe(200);
+    threads = await (await list()).json<ThreadList>();
+    expect(threads.active_thread_id).toBe(first);
+
+    expect((await f.store.handle(1, 'conversation',
+      new Request('http://internal/conversation', { method: 'DELETE',
+        body: JSON.stringify({ user_id: 10, thread_id: first }) }))).status).toBe(200);
+    threads = await (await list()).json<ThreadList>();
+    expect(threads.threads).toHaveLength(0);
+  });
+
+  it('rejects an unknown or cross-user thread instead of leaking it', async () => {
+    const foreign = await f.store.handle(1, 'conversation',
+      new Request('http://internal/conversation?user_id=20&thread=deadbeefdeadbeef', { method: 'GET' }));
+    expect(foreign.status).toBe(403);
+    const missing = await action({ action: 'activate', thread_id: 'deadbeefdeadbeef' });
+    expect(missing.status).toBe(404);
+  });
+});
+
 describe('Persisted agent conversation', () => {
   const append = (messages: unknown) => f.store.handle(1, 'conversation-append',
     new Request('http://internal/conversation', { method: 'POST', body: JSON.stringify({ user_id: 10, messages }) }));
@@ -41,14 +98,18 @@ describe('Persisted agent conversation', () => {
   it('round-trips a turn, keeps order and bumps the revision', async () => {
     expect((await append([{ role: 'user', content: '磁盘满了吗' },
       { role: 'assistant', content: '已检查，根分区占用 92%' }])).status).toBe(201);
-    const transcript = await (await read()).json<{ messages: any[]; revision: number }>();
+    const transcript = await (await read()).json<{ messages: any[]; revision: number; thread_id: string; title: string }>();
     expect(transcript.messages.map(message => [message.role, message.content])).toEqual([
       ['user', '磁盘满了吗'],
       ['assistant', '已检查，根分区占用 92%'],
     ]);
     expect(transcript.messages[0].seq).toBeLessThan(transcript.messages[1].seq);
     expect(transcript.revision).toBeGreaterThan(0);
-    expect(JSON.parse(await (await append([{ role: 'user', content: '继续' }])).text())).toEqual({ success: true, revision: 2 });
+    // 线程标题取自首条用户消息，后续追加不改写已有消息。
+    expect(transcript.title).toBe('磁盘满了吗');
+    const second = await (await append([{ role: 'user', content: '继续' }])).json<{ success: boolean; thread_id: string }>();
+    expect(second.success).toBe(true);
+    expect(second.thread_id).toBe(transcript.thread_id);
   });
 
   it('trims to the newest messages once the cap is exceeded', async () => {

@@ -47,10 +47,34 @@ describe('Agent memory provider request envelopes', () => {
     expect(requests[0].body).not.toHaveProperty('task');
   });
 
-  it('clears the conversation with the owner id only', async () => {
+  it('deletes one thread, or every thread when no id is given', async () => {
     const { provider, requests } = harness();
-    await provider.clearConversation();
-    expect(requests[0]).toMatchObject({ path: '/internal/servers/5/conversation', method: 'DELETE', body: { user_id: 7 } });
+    await provider.deleteConversation('abc12345');
+    expect(requests[0]).toMatchObject({ path: '/internal/servers/5/conversation', method: 'DELETE',
+      body: { user_id: 7, thread_id: 'abc12345' } });
+    await provider.deleteConversation();
+    // 省略 thread_id 表示清空全部线程；JSON.stringify 会丢掉 undefined 字段。
+    expect(requests[1]).toMatchObject({ method: 'DELETE', body: { user_id: 7 } });
+    expect(requests[1].body).not.toHaveProperty('thread_id');
+  });
+
+  it('creates, activates and renames threads through the conversations route', async () => {
+    const { provider, requests } = harness();
+    await provider.createConversation();
+    expect(requests[0]).toMatchObject({ path: '/internal/servers/5/conversations', method: 'POST',
+      body: { user_id: 7, action: 'create' } });
+    await provider.activateConversation('thread-1234');
+    expect(requests[1]).toMatchObject({ body: { user_id: 7, action: 'activate', thread_id: 'thread-1234' } });
+    await provider.renameConversation({ thread_id: 'thread-1234', title: '部署排查' });
+    expect(requests[2]).toMatchObject({ body: { user_id: 7, action: 'rename', thread_id: 'thread-1234', title: '部署排查' } });
+  });
+
+  it('reads one named thread and forwards the id on append', async () => {
+    const { provider, requests } = harness();
+    await provider.loadConversation('thread-1234');
+    expect(requests[0].path).toBe('/internal/servers/5/conversation');
+    await provider.appendConversation([{ role: 'user', content: 'x' }], 'thread-1234');
+    expect(requests[1]).toMatchObject({ method: 'POST', body: { user_id: 7, thread_id: 'thread-1234' } });
   });
 
   it('reads the conversation through the user-scoped query', async () => {

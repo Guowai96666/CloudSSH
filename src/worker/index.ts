@@ -554,34 +554,55 @@ async function handleServersRoute(request: Request, url: URL, env: Env): Promise
     return new Response('Method Not Allowed', { status: 405 });
   }
 
-  // /api/servers/:id/conversation —— Agent 可见对话的读取、追加与清空
+  // /api/servers/:id/conversation —— Agent 可见对话的读取、追加与删除（单条线程）
   const conversationMatch = url.pathname.match(/^\/api\/servers\/(\d+)\/conversation$/);
   if (conversationMatch) {
     const serverId = conversationMatch[1];
     if (request.method === 'GET') {
-      return stub.fetch(
-        new Request(`http://internal/internal/servers/${serverId}/conversation?user_id=${user.id}`, {
-          method: 'GET',
-        })
-      );
+      const thread = url.searchParams.get('thread');
+      const query = `?user_id=${user.id}${thread ? `&thread=${encodeURIComponent(thread)}` : ''}`;
+      return stub.fetch(new Request(`http://internal/internal/servers/${serverId}/conversation${query}`, { method: 'GET' }));
     }
     if (request.method === 'POST') {
-      // 只转发 role/content，不接受客户端提供的 user_id 覆盖。
-      const body = await request.json<{ messages?: unknown }>().catch(() => null);
+      // 只转发 role/content 与线程 id，不接受客户端提供的 user_id 覆盖。
+      const body = await request.json<{ messages?: unknown; thread_id?: unknown }>().catch(() => null);
       return stub.fetch(
         new Request(`http://internal/internal/servers/${serverId}/conversation`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ user_id: user.id, messages: body?.messages }),
+          body: JSON.stringify({ user_id: user.id, messages: body?.messages, thread_id: body?.thread_id }),
         })
       );
     }
     if (request.method === 'DELETE') {
+      // thread_id 存在时删除该线程；省略则清空全部线程。
+      const body = await request.json<{ thread_id?: unknown }>().catch(() => null);
       return stub.fetch(
         new Request(`http://internal/internal/servers/${serverId}/conversation`, {
           method: 'DELETE',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ user_id: user.id }),
+          body: JSON.stringify({ user_id: user.id, thread_id: body?.thread_id }),
+        })
+      );
+    }
+    return new Response('Method Not Allowed', { status: 405 });
+  }
+
+  // /api/servers/:id/conversations —— 会话历史：列表、新建、切换、重命名
+  const conversationsMatch = url.pathname.match(/^\/api\/servers\/(\d+)\/conversations$/);
+  if (conversationsMatch) {
+    const serverId = conversationsMatch[1];
+    if (request.method === 'GET') {
+      return stub.fetch(new Request(`http://internal/internal/servers/${serverId}/conversations?user_id=${user.id}`, { method: 'GET' }));
+    }
+    if (request.method === 'POST') {
+      const body = await request.json<{ action?: unknown; thread_id?: unknown; title?: unknown }>().catch(() => null);
+      const action = body?.action === 'activate' ? 'activate' : body?.action === 'rename' ? 'rename' : 'create';
+      return stub.fetch(
+        new Request(`http://internal/internal/servers/${serverId}/conversations`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_id: user.id, action, thread_id: body?.thread_id, title: body?.title }),
         })
       );
     }

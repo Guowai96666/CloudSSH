@@ -241,7 +241,10 @@ export class SSHSessionDO {
           }
           if (
             msg &&
-            (msg.type === 'agent_confirm' || msg.type === 'agent_stop' || msg.type === 'agent_reset')
+            (msg.type === 'agent_confirm' || msg.type === 'agent_stop' || msg.type === 'agent_reset' ||
+              // 会话历史相关控制消息同样绕过阻塞中的任务处理
+              msg.type === 'agent_threads_list' || msg.type === 'agent_thread_open' ||
+              msg.type === 'agent_thread_delete')
           ) {
             session.handleAgentControl(msg.type, msg);
             return;
