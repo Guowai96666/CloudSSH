@@ -1,5 +1,8 @@
 // Agent panel UI — right sidebar for AI Agent interaction
 
+import {
+  AGENT_EXECUTION_MODES, DEFAULT_AGENT_EXECUTION_MODE, normalizeAgentExecutionMode,
+} from '../../../src/agent-execution-mode';
 import { isAgentSessionState, type AgentSessionState } from '../../../src/agent-session-state';
 import DOMPurify from 'dompurify';
 import { marked, type Tokens } from 'marked';
@@ -27,7 +30,15 @@ import {
   type TerminalSelectionContext,
 } from './terminal-selection-context';
 
-export type AgentExecutionMode = 'interactive' | 'auto';
+export { AGENT_EXECUTION_MODES, DEFAULT_AGENT_EXECUTION_MODE, normalizeAgentExecutionMode };
+export type AgentExecutionMode = 'auto' | 'confirm' | 'observe';
+
+/** 各执行模式对应的词条 key（下拉框文案与提示复用同一份）。 */
+const MODE_LABEL_KEY: Record<AgentExecutionMode, Parameters<typeof t>[0]> = {
+  auto: 'agent.modeAutoOption',
+  confirm: 'agent.modeConfirmOption',
+  observe: 'agent.modeObserveOption',
+};
 export const AGENT_MODE_STORAGE_KEY = 'cloudssh_agent_mode';
 
 interface TerminalFillTarget {
@@ -118,7 +129,7 @@ export class AgentPanel {
   private livePreviewCache: string[] = [];
   private localeCleanup: (() => void) | null = null;
   private pendingTerminalSelection: TerminalSelectionContext | null = null;
-  private agentMode: AgentExecutionMode = 'interactive';
+  private agentMode: AgentExecutionMode = DEFAULT_AGENT_EXECUTION_MODE;
   private isInputComposing: boolean = false;
   private autoConfirmTimer: number | null = null;
   private autoConfirmInterval: number | null = null;
@@ -174,9 +185,7 @@ export class AgentPanel {
   ) {
     try {
       const savedMode = localStorage.getItem(AGENT_MODE_STORAGE_KEY);
-      if (savedMode === 'auto' || savedMode === 'interactive') {
-        this.agentMode = savedMode;
-      }
+      if (savedMode) this.agentMode = normalizeAgentExecutionMode(savedMode);
     } catch {
       /* ignore storage access error */
     }
@@ -197,30 +206,19 @@ export class AgentPanel {
     this.updateModeUI();
   }
 
+  /** 把当前模式同步到输入框旁的下拉框。 */
   private updateModeUI(): void {
-    const control = this.panelEl?.querySelector<HTMLElement>('#agent-mode-control');
-    if (!control) return;
-    control.dataset.activeMode = this.agentMode;
-    control.querySelectorAll<HTMLButtonElement>('.agent-mode-btn').forEach((btn) => {
-      const isActive = btn.dataset.mode === this.agentMode;
-      btn.classList.toggle('is-active', isActive);
-      btn.setAttribute('aria-checked', isActive ? 'true' : 'false');
-    });
+    const select = this.panelEl?.querySelector<HTMLSelectElement>('#agent-mode-select');
+    if (select && select.value !== this.agentMode) select.value = this.agentMode;
+    select?.setAttribute('data-active-mode', this.agentMode);
   }
 
+  /** 语言切换后重刷下拉框选项文案与提示。 */
   private refreshModeTooltips(): void {
-    const control = this.panelEl?.querySelector<HTMLElement>('#agent-mode-control');
-    if (!control) return;
-    const interactiveBtn = control.querySelector<HTMLButtonElement>('[data-mode="interactive"]');
-    const autoBtn = control.querySelector<HTMLButtonElement>('[data-mode="auto"]');
-    if (interactiveBtn) {
-      interactiveBtn.title = t('agent.modeInteractiveTooltip');
-      interactiveBtn.setAttribute('data-i18n-title', 'agent.modeInteractiveTooltip');
-    }
-    if (autoBtn) {
-      autoBtn.title = t('agent.modeAutoTooltip');
-      autoBtn.setAttribute('data-i18n-title', 'agent.modeAutoTooltip');
-    }
+    const select = this.panelEl?.querySelector<HTMLSelectElement>('#agent-mode-select');
+    if (!select) return;
+    select.title = t(MODE_LABEL_KEY[this.agentMode]);
+    select.setAttribute('aria-label', t('agent.modeLabel'));
   }
 
   setServerId(serverId?: number): void {
@@ -374,16 +372,6 @@ export class AgentPanel {
             <span class="agent-panel-title text-xs font-bold tracking-[0.1em] text-[var(--accent-secondary)] truncate" data-i18n="agent.title">AI Agent 助手</span>
           </div>
           <div class="flex items-center gap-1.5">
-            <div id="agent-mode-control" class="agent-mode-segmented" role="radiogroup" aria-label="Agent execution mode" data-active-mode="${this.agentMode}">
-              <button type="button" class="agent-mode-btn ${this.agentMode === 'interactive' ? 'is-active' : ''}" data-mode="interactive" data-i18n-title="agent.modeInteractiveTooltip" title="${t('agent.modeInteractiveTooltip')}" role="radio" aria-checked="${this.agentMode === 'interactive'}">
-                <span class="material-symbols-outlined">shield</span>
-                <span class="agent-mode-btn-text" data-i18n="agent.modeInteractiveShort">${t('agent.modeInteractiveShort')}</span>
-              </button>
-              <button type="button" class="agent-mode-btn ${this.agentMode === 'auto' ? 'is-active' : ''}" data-mode="auto" data-i18n-title="agent.modeAutoTooltip" title="${t('agent.modeAutoTooltip')}" role="radio" aria-checked="${this.agentMode === 'auto'}">
-                <span class="material-symbols-outlined">bolt</span>
-                <span class="agent-mode-btn-text" data-i18n="agent.modeAutoShort">${t('agent.modeAutoShort')}</span>
-              </button>
-            </div>
             <button id="agent-threads-btn" class="agent-header-btn" data-i18n-title="agent.threadsTitle" title="${t('agent.threadsTitle')}" aria-label="${t('agent.threadsTitle')}" aria-expanded="false" aria-haspopup="dialog">
               <span class="material-symbols-outlined" aria-hidden="true">forum</span>
             </button>
@@ -482,6 +470,15 @@ export class AgentPanel {
           </div>
           <div id="agent-context" class="agent-context-container hidden"></div>
           <div class="flex gap-2.5 items-end">
+            <div class="agent-mode-select-wrap shrink-0">
+              <label class="sr-only" for="agent-mode-select" data-i18n="agent.modeLabel">执行模式</label>
+              <select id="agent-mode-select" class="agent-mode-select" data-testid="agent-mode-select">
+                <option value="auto" data-i18n="agent.modeAutoOption">自动（自动执行）</option>
+                <option value="confirm" data-i18n="agent.modeConfirmOption">确认（写操作前确认）</option>
+                <option value="observe" data-i18n="agent.modeObserveOption">观察（只读）</option>
+              </select>
+              <span class="material-symbols-outlined agent-mode-select-caret" aria-hidden="true">expand_more</span>
+            </div>
             <textarea id="agent-input" data-i18n-placeholder="agent.placeholder" placeholder="描述你希望 Agent 完成的任务…"
               rows="1"
               class="terminal-input flex-1 text-[13px] resize-none overflow-y-auto"
@@ -539,14 +536,11 @@ export class AgentPanel {
   }
 
   private bindEvents(): void {
-    this.panelEl?.querySelectorAll<HTMLButtonElement>('.agent-mode-btn').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const mode = btn.dataset.mode as AgentExecutionMode;
-        if (mode === 'interactive' || mode === 'auto') {
-          this.setAgentMode(mode);
-        }
-      });
+    this.panelEl?.querySelector<HTMLSelectElement>('#agent-mode-select')?.addEventListener('change', (event) => {
+      const mode = normalizeAgentExecutionMode((event.target as HTMLSelectElement).value);
+      this.setAgentMode(mode);
     });
+    this.updateModeUI();
     this.panelEl?.querySelector('[data-agent-retry]')?.addEventListener('click', () => this.resumeConnection());
     this.panelEl?.querySelector('[data-agent-force-stop]')?.addEventListener('click', () => this.handleStop());
     this.panelEl?.querySelector('#agent-close-btn')?.addEventListener('click', () => this.hide());
@@ -878,6 +872,7 @@ export class AgentPanel {
       locale: getLocale(),
       timezone,
       supersede: isSupersede ? true : undefined,
+      agentMode: this.agentMode,
     };
     this.wsSend?.(JSON.stringify(payload));
     return true;
@@ -1841,6 +1836,7 @@ export class AgentPanel {
       timezone,
       userIndex: targetUserIndex,
       supersede: wasRunning ? true : undefined,
+      agentMode: this.agentMode,
     };
     this.wsSend?.(JSON.stringify(payload));
   }

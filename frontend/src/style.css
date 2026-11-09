@@ -5595,3 +5595,62 @@ html[data-ui-motion="none"] :is(.flicker, .scanlines, .scanline) {
 }
 
 
+
+/* ===== Agent 执行模式下拉框（输入框左侧） =====
+   与输入框同一视觉基线：透明底、主题变量、去掉原生箭头后自绘 caret。 */
+.agent-mode-select-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.agent-mode-select {
+  appearance: none;
+  -webkit-appearance: none;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--control-radius);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  line-height: 1.4;
+  min-height: var(--control-min-height, 32px);
+  max-width: 9.5rem;
+  padding: 6px 22px 6px 8px;
+  cursor: pointer;
+  outline: none;
+  transition:
+    border-color var(--motion-fast),
+    background-color var(--motion-fast);
+}
+
+.agent-mode-select:hover {
+  border-color: var(--border-strong);
+}
+
+.agent-mode-select:focus {
+  border-color: var(--accent);
+}
+
+.agent-mode-select[data-active-mode="observe"] {
+  border-color: var(--accent-secondary);
+  color: var(--accent-secondary);
+}
+
+.agent-mode-select[data-active-mode="auto"] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.agent-mode-select option {
+  background: var(--bg);
+  color: var(--text);
+}
+
+.agent-mode-select-caret {
+  position: absolute;
+  right: 4px;
+  font-size: 15px;
+  pointer-events: none;
+  color: var(--text-dim);
+}

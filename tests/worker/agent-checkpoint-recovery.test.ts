@@ -43,7 +43,9 @@ describe('Application-level long-task compaction in AgentCore', () => {
       return sse([{ type: 'response.completed', response }]);
     });
 
-    await agent.handleAgentStart('1', 'Inspect the blog and fail2ban; never change firewall rules.');
+    // 合成命令 `inspect_N` 不在只读白名单里；这个用例考的是压缩，不是确认策略。
+    await agent.handleAgentStart('1', 'Inspect the blog and fail2ban; never change firewall rules.',
+      'zh-CN', 'UTC', undefined, undefined, 'auto');
     expect(compactions).toBe(1);
     expect(frames.at(-1)).toMatchObject({ subType: 'run_end', outcome: 'completed', usage: { checkpointCalls: 1 } });
     expect(frames.filter(frame => frame.subType === 'error')).toEqual([]);

@@ -2240,7 +2240,8 @@ export class SSHSession {
             parsed.timezone,
             parsed.supersede === true,
             typeof parsed.userIndex === 'number' ? parsed.userIndex : undefined,
-            typeof parsed.requestId === 'string' && parsed.requestId.length <= 64 ? parsed.requestId : undefined
+            typeof parsed.requestId === 'string' && parsed.requestId.length <= 64 ? parsed.requestId : undefined,
+            parsed.agentMode
           );
           return;
         }
@@ -2998,7 +2999,8 @@ export class SSHSession {
     requestedTimezone?: string,
     supersede = false,
     userIndex?: number,
-    requestId?: string
+    requestId?: string,
+    executionMode?: unknown
   ): Promise<void> {
     if (this.config.sessionPolicy?.source === 'share') {
       this.sendAgentFrame({
@@ -3068,7 +3070,7 @@ export class SSHSession {
       requestedTimezone.length <= 64
         ? requestedTimezone
         : undefined;
-    void core.handleAgentStart(effectiveUserId, userMessage, locale, timezone, userIndex, requestId);
+    void core.handleAgentStart(effectiveUserId, userMessage, locale, timezone, userIndex, requestId, executionMode);
   }
 
   private sendAgentState(syncId: unknown): void {

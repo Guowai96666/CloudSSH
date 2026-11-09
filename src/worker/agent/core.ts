@@ -1,5 +1,6 @@
 // Agent orchestration inside SSHSessionDO. Responses is the only LLM protocol.
 import { normalizeResponseDiagnostics } from '../../agent-response-diagnostics';
+import { DEFAULT_AGENT_EXECUTION_MODE, normalizeAgentExecutionMode, type AgentExecutionMode } from '../../agent-execution-mode';
 import { emptyAgentSessionState, MAX_AGENT_RECOVERY_TEXT_CHARS, type AgentSessionState } from '../../agent-session-state';
 import { resolveModelBudget } from '../../ai-model-policy';
 import type { UnifiedServerMemory } from '../../server-memory-schema';
@@ -86,9 +87,15 @@ export class AgentCore {
 
   getStatus(): string { return this.state.status; }
 
+  /** 当前执行模式（供状态同步与诊断使用）。 */
+  getExecutionMode(): AgentExecutionMode { return this.toolExecutor.getMode() ?? DEFAULT_AGENT_EXECUTION_MODE; }
+
   getSessionState(): AgentSessionState { return { ...this.recovery }; }
 
-  async handleAgentStart(userId: string, message: string, locale: AgentLocale = 'zh-CN', timezone?: string, userIndex?: number, requestId?: string): Promise<void> {
+  async handleAgentStart(userId: string, message: string, locale: AgentLocale = 'zh-CN', timezone?: string,
+    userIndex?: number, requestId?: string, executionMode?: unknown): Promise<void> {
+    // 每轮都按客户端下发的模式重置；缺省回落到「写操作前确认」，绝不放宽权限。
+    this.toolExecutor.setMode(normalizeAgentExecutionMode(executionMode));
     const previous = this.activeRun;
     this.agentAbort('superseded');
     const id = ++this.runId;

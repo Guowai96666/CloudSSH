@@ -1,5 +1,6 @@
 // Tool call execution engine — dispatches tool calls to their implementations
 
+import { decideExecution, DEFAULT_AGENT_EXECUTION_MODE, type AgentExecutionMode } from '../../agent-execution-mode';
 import {
   isBlockedCommand,
   isBlockedFilePath,
@@ -31,13 +32,46 @@ export type ExecCommandFn = (
   signal?: AbortSignal
 ) => Promise<ExecResult>;
 
+/** 观察模式下允许的 service_manage 动作（只查询状态）。 */
+const READ_ONLY_SERVICE_ACTIONS = new Set(['status']);
+/** 观察模式下允许的 docker_manage 动作（只查询）。 */
+const READ_ONLY_DOCKER_ACTIONS = new Set(['ps', 'logs', 'inspect', 'images']);
+
+function isReadOnlyServiceAction(action: unknown): boolean {
+  return typeof action === 'string' && READ_ONLY_SERVICE_ACTIONS.has(action);
+}
+
+function isReadOnlyDockerAction(action: unknown): boolean {
+  return typeof action === 'string' && READ_ONLY_DOCKER_ACTIONS.has(action);
+}
+
 export class ToolExecutor {
+  /** 当前执行模式；由 AgentCore 在每轮开始时写入，决定确认与拒绝策略。 */
+  private mode: AgentExecutionMode = DEFAULT_AGENT_EXECUTION_MODE;
+
   constructor(
     private terminalContext: TerminalContext,
     private execCommand: ExecCommandFn,
     private askConfirmation: (command: string, reason: string, signal?: AbortSignal) => Promise<boolean>,
     private resetTimeout?: () => void
   ) {}
+
+  /** 设置本轮执行模式（auto / confirm / observe）。 */
+  setMode(mode: AgentExecutionMode): void { this.mode = mode; }
+
+  /** 当前执行模式。 */
+  getMode(): AgentExecutionMode { return this.mode; }
+
+  /** 观察模式下拒绝写操作工具时的统一回复。 */
+  private observeRejection(tool: string): string {
+    return JSON.stringify({
+      stdout: '',
+      stderr: `观察模式只允许只读操作，已拒绝 ${tool}`,
+      exit_code: -1,
+      blocked: true,
+      mode: 'observe',
+    });
+  }
 
   async execute(toolName: string, args: any, signal?: AbortSignal): Promise<string> {
     switch (toolName) {
@@ -48,8 +82,14 @@ export class ToolExecutor {
       case 'list_processes':
         return this.handleListProcesses(signal);
       case 'service_manage':
+        if (this.mode === 'observe' && !isReadOnlyServiceAction(args.action)) {
+          return this.observeRejection('service_manage');
+        }
         return this.handleServiceManage(args.action, args.service, signal);
       case 'docker_manage':
+        if (this.mode === 'observe' && !isReadOnlyDockerAction(args.action)) {
+          return this.observeRejection('docker_manage');
+        }
         return this.handleDockerManage(args.action, args.target, args.options, signal);
       case 'detect_environment':
         return this.handleDetectEnvironment(signal);
@@ -60,6 +100,7 @@ export class ToolExecutor {
       case 'read_file':
         return this.handleReadFile(args.path, args.offset, args.limit, signal);
       case 'write_file':
+        if (this.mode === 'observe') return this.observeRejection('write_file');
         return this.handleWriteFile(args.path, args.content, args.search, signal);
       default:
         return `Unknown tool: ${toolName}`;
@@ -82,10 +123,20 @@ export class ToolExecutor {
       });
     }
 
-    // Check if this command needs user confirmation
+    // 按执行模式裁决：观察模式拒绝写操作，确认模式拦截写操作，自动模式放行。
     const confirm = needsConfirmation(command);
-    if (confirm.required) {
-      const approved = await this.askConfirmationWithAbort(command, confirm.reason!, signal);
+    const decision = decideExecution(this.mode, command, confirm.required);
+    if (decision.action === 'reject') {
+      return JSON.stringify({
+        stdout: '',
+        stderr: `观察模式已拒绝：${decision.reason ?? '只允许只读命令'}`,
+        exit_code: -1,
+        blocked: true,
+        mode: this.mode,
+      });
+    }
+    if (decision.action === 'confirm') {
+      const approved = await this.askConfirmationWithAbort(command, confirm.reason ?? decision.reason ?? '需要确认', signal);
       if (!approved) {
         if (signal?.aborted) return JSON.stringify({ status: 'cancelled', executed: false });
         return JSON.stringify({
