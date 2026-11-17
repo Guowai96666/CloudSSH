@@ -5654,3 +5654,95 @@ html[data-ui-motion="none"] :is(.flicker, .scanlines, .scanline) {
   pointer-events: none;
   color: var(--text-dim);
 }
+
+/* ===== Agent Markdown 排版优化 =====
+   目标：长回复（多级标题 + 宽表格 + 列表 + 代码）在窄面板里也能看清层级。 */
+.agent-md-content {
+  /* 中文正文的行距略宽一点，长段落更易读 */
+  line-height: 1.7;
+}
+
+/* 一级标题：加分隔线，作为大段落分界 */
+.agent-md-content h1 {
+  font-size: 15px;
+  margin: 16px 0 8px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid color-mix(in srgb, var(--agent-agent-color) 22%, transparent);
+}
+.agent-md-content > h1:first-child {
+  margin-top: 0;
+}
+
+.agent-md-content h2 {
+  font-size: 13.5px;
+  margin: 14px 0 6px;
+}
+.agent-md-content h3 {
+  font-size: 13px;
+  margin: 12px 0 5px;
+}
+
+/* 段落之间留出呼吸感 */
+.agent-md-content p {
+  margin: 6px 0;
+}
+
+/* 代码块与表格之间也不贴太紧 */
+.agent-md-content .agent-md-code-block + p,
+.agent-md-content table + p {
+  margin-top: 8px;
+}
+
+/* 表格：窄面板下允许横向滚动，表头吸顶，单元格不换行挤压 */
+.agent-md-content table {
+  display: block;
+  width: 100%;
+  overflow-x: auto;
+  margin: 8px 0 10px;
+  font-size: 11.5px;
+  border: 1px solid color-mix(in srgb, var(--agent-agent-color) 18%, transparent);
+  border-radius: 6px;
+}
+.agent-md-content thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: color-mix(in srgb, var(--agent-agent-color) 12%, var(--bg));
+}
+.agent-md-content th,
+.agent-md-content td {
+  padding: 6px 9px;
+  white-space: nowrap;
+  max-width: 22rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-bottom: 1px solid color-mix(in srgb, var(--agent-agent-color) 14%, transparent);
+}
+/* 最后一列通常是说明，允许换行，避免被省略号切掉关键信息 */
+.agent-md-content td:last-child {
+  white-space: normal;
+  min-width: 8rem;
+}
+.agent-md-content tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* 列表：缩进加大，层级更明显 */
+.agent-md-content ul,
+.agent-md-content ol {
+  margin: 6px 0;
+  padding-left: 24px;
+}
+.agent-md-content li {
+  margin: 3px 0;
+}
+.agent-md-content li > ul,
+.agent-md-content li > ol {
+  margin: 3px 0;
+}
+
+/* 引用块：作为提示区的视觉锚点 */
+.agent-md-content blockquote {
+  margin: 8px 0;
+  padding: 6px 12px;
+}

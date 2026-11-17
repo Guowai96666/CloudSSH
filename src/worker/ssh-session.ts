@@ -218,6 +218,8 @@ export class SSHSession {
   private negotiatedMacC2S: string = 'none';
   private negotiatedMacS2C: string = 'none';
 
+  /** 客户端暂不可达时暂停输出投递（后台标签页被冻结等），不终结会话。 */
+  private outputPaused: boolean = false;
   private keepaliveInterval: ReturnType<typeof setInterval> | null = null;
   private keepaliveFailCount: number = 0;
   private readonly maxKeepaliveFails: number = 3;
@@ -286,7 +288,8 @@ export class SSHSession {
   private readonly detachedBuffer = new DetachedSessionBuffer();
   private outputFlowAnnounced = false;
   private readonly terminalOutputGuard = new TerminalOutputGuard(() => {
-    this.closeForOutputBacklog();
+    // ACK 超时只暂停投递：客户端可能只是被后台冻结，不是链路死亡。
+    this.pauseForOutputBacklog();
   });
 
   get detachedBufferBytes(): number {
@@ -2208,6 +2211,11 @@ export class SSHSession {
         if (parsed.type === 'terminal_output_ack') {
           if (!this.closed && !this.isDetached()) {
             this.terminalOutputGuard.acknowledge(parsed.id, parsed.bytes);
+            // 客户端回来了：解除因积压导致的输出暂停，继续投递。
+            if (this.outputPaused) {
+              this.outputPaused = false;
+              this.outputFlowAnnounced = false;
+            }
           }
           return;
         }
@@ -3407,20 +3415,22 @@ export class SSHSession {
     }
   }
 
-  private closeForOutputBacklog(): void {
-    if (this.closed) return;
-    try {
-      this.sendError('终端输出积压或客户端确认超时，连接已关闭', 'output_backlog_closed');
-    } finally {
-      // Normal close prevents automatic reconnect from restarting noisy commands.
-      this.close(true);
-    }
+  /**
+   * 输出积压/确认超时：客户端只是暂时不可达（后台标签页被冻结、切换窗口），
+   * 不该终结会话。这里只停止继续投递并缓存到有界缓冲，等客户端回来 ACK 后再继续。
+   * 真正死亡由链路看门狗（lastPacketAt + 60s 宽限）负责，不会漏杀僵尸会话。
+   */
+  private pauseForOutputBacklog(): void {
+    if (this.closed || this.outputPaused) return;
+    this.outputPaused = true;
+    this.terminalOutputGuard.reset();
+    this.sendDebug(() => 'terminal output paused: client ack pending');
   }
 
   private forwardTerminalOutput(data: Uint8Array): boolean {
-    if (this.closed) return false;
+    if (this.closed || this.outputPaused) return false;
     if (!this.terminalOutputGuard.reserve(data.byteLength)) {
-      this.closeForOutputBacklog();
+      this.pauseForOutputBacklog();
       return false;
     }
     try {
@@ -3431,7 +3441,7 @@ export class SSHSession {
       this.ws.send(data);
       return true;
     } catch {
-      this.closeForOutputBacklog();
+      this.pauseForOutputBacklog();
       return false;
     }
   }

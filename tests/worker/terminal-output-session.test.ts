@@ -42,8 +42,8 @@ describe('SSH terminal output cost/availability gate', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
-  it('stdout + stderr share the 4 MiB cap; overflow stops forwarding/window renewals and closes normally', async () => {
-    const { internal, ws, socket, adjust } = createSession();
+  it('stdout + stderr share the 4 MiB cap; overflow pauses delivery instead of killing the session', async () => {
+    const { session, internal, ws, socket, adjust } = createSession();
     const chunkSize = 32 * 1024;
     for (let i = 0; i < LIMIT / chunkSize; i++) {
       const type = i % 2 === 0 ? SSH_MSG_CHANNEL_DATA : SSH_MSG_CHANNEL_EXTENDED_DATA;
@@ -54,11 +54,27 @@ describe('SSH terminal output cost/availability gate', () => {
     await internal.handleSessionPacket(SSH_MSG_CHANNEL_DATA, payload(SSH_MSG_CHANNEL_DATA, 1));
     expect(ws.send.mock.calls.filter(([data]) => data instanceof Uint8Array))
       .toHaveLength(LIMIT / chunkSize);
-    expect(adjust).toHaveBeenCalledTimes(LIMIT / chunkSize);
-    expect(socket.close).toHaveBeenCalledOnce();
-    expect(ws.close).toHaveBeenCalledWith(1000);
-    expect(ws.send).toHaveBeenCalledWith(expect.stringContaining('output_backlog_closed'));
-    expect(vi.getTimerCount()).toBe(0);
+    // 后台标签页被冻结时客户端收不到 ACK：只暂停投递，不关会话、不关 socket。
+    expect(internal.outputPaused).toBe(true);
+    expect(socket.close).not.toHaveBeenCalled();
+    expect(ws.close).not.toHaveBeenCalled();
+    session.close(true);
+  });
+
+  it('resumes delivery once the client acknowledges after a pause', async () => {
+    const { session, internal, ws } = createSession();
+    const chunkSize = 32 * 1024;
+    for (let i = 0; i < LIMIT / chunkSize; i++) {
+      await internal.handleSessionPacket(SSH_MSG_CHANNEL_DATA, payload(SSH_MSG_CHANNEL_DATA, chunkSize));
+    }
+    await internal.handleSessionPacket(SSH_MSG_CHANNEL_DATA, payload(SSH_MSG_CHANNEL_DATA, 1));
+    expect(internal.outputPaused).toBe(true);
+    await session.handleWebSocketMessage(JSON.stringify({ type: 'terminal_output_ack', id: flowId(ws), bytes: LIMIT }));
+    expect(internal.outputPaused).toBe(false);
+    await internal.handleSessionPacket(SSH_MSG_CHANNEL_DATA, payload(SSH_MSG_CHANNEL_DATA, 128));
+    expect(ws.send.mock.calls.filter(([data]) => data instanceof Uint8Array).length)
+      .toBeGreaterThan(LIMIT / chunkSize);
+    session.close(true);
   });
 
   it('ACKs free budget without becoming SSH input or resetting user activity', async () => {
@@ -74,15 +90,18 @@ describe('SSH terminal output cost/availability gate', () => {
     session.close(true);
   });
 
-  it('ping/remote output cannot keep an unacknowledged client alive indefinitely', async () => {
+  it('unacknowledged client pauses output instead of terminating the session', async () => {
     const { session, internal, ws, socket } = createSession();
     await internal.handleSessionPacket(SSH_MSG_CHANNEL_DATA, payload(SSH_MSG_CHANNEL_DATA, 1));
     vi.advanceTimersByTime(TIMEOUT - 1);
     await session.handleWebSocketMessage('{"type":"ping"}');
     await internal.handleSessionPacket(SSH_MSG_CHANNEL_EXTENDED_DATA, payload(SSH_MSG_CHANNEL_EXTENDED_DATA, 1));
     vi.advanceTimersByTime(1);
-    expect(socket.close).toHaveBeenCalledOnce();
-    expect(ws.close).toHaveBeenCalledWith(1000);
+    // 客户端可能只是被后台冻结：暂停投递即可，链路死亡交给 keepalive 看门狗。
+    expect(internal.outputPaused).toBe(true);
+    expect(socket.close).not.toHaveBeenCalled();
+    expect(ws.close).not.toHaveBeenCalled();
+    session.close(true);
   });
 
   it('detach cancels the deadline; replay is charged to a new epoch and rejects old ACKs', async () => {
@@ -104,12 +123,12 @@ describe('SSH terminal output cost/availability gate', () => {
     session.close(true);
   });
 
-  it('failed output sends terminate instead of continuing to renew the SSH window', async () => {
-    const { internal, ws, socket, adjust } = createSession();
+  it('a failed output send pauses delivery and stops renewing the SSH window', async () => {
+    const { session, internal, ws, adjust } = createSession();
     ws.send.mockImplementation(() => { throw new Error('closed'); });
     await internal.handleSessionPacket(SSH_MSG_CHANNEL_DATA, payload(SSH_MSG_CHANNEL_DATA, 10));
     expect(adjust).not.toHaveBeenCalled();
-    expect(socket.close).toHaveBeenCalledOnce();
-    expect(vi.getTimerCount()).toBe(0);
+    expect(internal.outputPaused).toBe(true);
+    session.close(true);
   });
 });

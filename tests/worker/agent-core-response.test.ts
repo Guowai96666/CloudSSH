@@ -269,6 +269,37 @@ describe('AgentCore Responses delivery and context', () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
+  it('persists the text already streamed when the run is interrupted', async () => {
+    let agent: AgentCore;
+    const append = vi.fn(async (_messages: unknown[]) => {});
+    const memory = { fetchUnifiedMemory: async () => ({ workLogs: [], knowledge: [], revision: 0 }),
+      enqueueMemory: vi.fn(async () => {}),
+      loadConversation: async () => ({ messages: [], revision: 0 }),
+      appendConversation: append, clearConversation: vi.fn(async () => {}) };
+    const exec = vi.fn(async (command: string) => {
+      if (!command.includes('PWD:$(pwd)')) agent.agentAbort('connection_closed');
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    });
+    const created = setup({ exec, memory }); agent = created.agent;
+    // 先流出一段文字，再触发一个工具调用，随后在工具阶段被中断：
+    // finalText 为空，但已生成的内容不能丢。
+    let calls = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const body = JSON.parse(init!.body as string);
+      calls++;
+      return calls === 1
+        ? reply('stream', '已经排查到端口 8080 被占用。', [functionCall('call_1', 'execute_command',
+          { command: 'ss -lntp', timeout_ms: 1000 })], body)
+        : reply('never', 'unused', [], body);
+    });
+    await agent.handleAgentStart('1', '检查端口占用'); await Promise.all(created.waits);
+    expect(append).toHaveBeenCalledTimes(1);
+    const messages = append.mock.calls[0][0] as Array<{ role: string; content: string }>;
+    expect(messages[0]).toEqual({ role: 'user', content: '检查端口占用' });
+    expect(messages[1].role).toBe('assistant');
+    expect(messages[1].content).toContain('8080');
+  });
+
   it('persists the visible turn through the conversation contract, not the distillation envelope', async () => {
     const append = vi.fn(async (_messages: unknown[]) => {});
     const memory = { fetchUnifiedMemory: async () => ({ workLogs: [], knowledge: [], revision: 0 }),

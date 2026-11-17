@@ -184,6 +184,7 @@ export class SSHTerminal {
   private pendingHeartbeatId: string | null = null;
   private heartbeatResponseTimeout: ReturnType<typeof setTimeout> | null = null;
   private pageHiddenAt: number | null = null;
+  private onPageResume: (() => void) | null = null;
   private wsLatency: number | null = null;
   private onLatencyUpdated?: (
     cfLatency: number | null,
@@ -428,6 +429,11 @@ export class SSHTerminal {
 
   setSessionReadyHandler(handler: (resumed?: boolean) => void): void {
     this.onSessionReady = handler;
+  }
+
+  /** 页面从后台恢复时触发，供 Agent 面板补拉会话记录。 */
+  setPageResumeHandler(handler: () => void): void {
+    this.onPageResume = handler;
   }
 
   setAgentFrameHandler(handler: (msg: any) => void): void {
@@ -1615,6 +1621,8 @@ export class SSHTerminal {
   private verifyConnectionAfterResume(): void {
     const returnedFromBackground = this.pageHiddenAt !== null;
     this.pageHiddenAt = null;
+    // 后台冻结期间生成的 Agent 回复可能没到前端：恢复时让面板补一次同步。
+    if (returnedFromBackground) this.onPageResume?.();
     const socket = this.ws;
     if (!socket) return;
 

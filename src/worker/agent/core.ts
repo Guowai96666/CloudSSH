@@ -247,6 +247,8 @@ export class AgentCore {
     let aiConfig: AIConfig | null = null;
     let didExecute = false;
     let finalText = '';
+    // 流式增量累积：连接中断时 finalText 可能还是空串，用它兜底保存已生成内容。
+    let streamedText = '';
     let purpose: 'main' | 'checkpoint' = 'main';
     this.emit(id, { subType: 'run_start' });
     this.resetTimeout(controller);
@@ -338,7 +340,11 @@ export class AgentCore {
             tools: AGENT_TOOLS,
             max_output_tokens: budgets.max_output_tokens, prompt_cache_key: context.cacheKey,
             allowIncomplete: true }, signal,
-            delta => { streamed = true; this.emit(id, { subType: 'stream_chunk', content: delta }); });
+            delta => {
+              streamed = true;
+              streamedText += delta;
+              this.emit(id, { subType: 'stream_chunk', content: delta });
+            });
         } catch (error) {
           const exceeded = error instanceof ResponsesError && error.diagnostics.providerCode === 'context_length_exceeded';
           const used = context.lastInputTokens || Math.floor(budgets.context_window * 0.75);
@@ -431,7 +437,8 @@ export class AgentCore {
       }
       // Only numeric metadata is logged; no credentials, terminal text, or provider error bodies.
       console.info('Agent Responses usage', { runId: id, outcome, ...totals });
-      this.persistConversation(finalText);
+      // 被中断时 finalText 可能为空，但已经流出的内容必须保留。
+      this.persistConversation(finalText || streamedText);
       if (aiConfig && context === this.context && signal.reason !== 'reset' && this.memoryProvider &&
         (didExecute || outcome === 'completed') && !shouldBypassDistillation(message)) {
         const promise = this.memoryProvider.enqueueMemory({ taskId: crypto.randomUUID(), goal: message,

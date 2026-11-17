@@ -192,6 +192,8 @@ export class TabManager {
           tab.terminal.setAgentFrameHandler((msg: any) => {
             tab.agentPanel?.handleAgentFrame(msg);
           });
+          // 页面从后台恢复时补拉会话记录（冻结期间的回复可能没到前端）
+          tab.terminal.setPageResumeHandler(() => tab.agentPanel?.handlePageResume());
           // 互斥联动：Agent 打开前自动收起 SFTP 面板
           tab.agentPanel.setBeforeShowHandler(() => {
             tab.sftpPanel?.hide();
@@ -200,7 +202,11 @@ export class TabManager {
           tab.agentPanel.setLayoutChangeHandler(() => tab.terminal.fit());
           this.updateSelectionAction(tab);
         }
-        if (resumed) tab.agentPanel?.resumeConnection();
+        if (resumed) {
+          tab.agentPanel?.resumeConnection();
+          // 从后台恢复时补一次会话记录同步：冻结期间生成的回复可能没到前端。
+          tab.agentPanel?.handlePageResume();
+        }
       }
     });
 

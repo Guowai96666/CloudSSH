@@ -237,6 +237,18 @@ export class AgentPanel {
     void this.hydrateConversation();
   }
 
+  /**
+   * 页面从后台恢复时调用：连接中断过就重新同步；面板为空则重新拉取会话记录。
+   * 后台标签页被浏览器冻结后，之前生成的回复可能没到前端，这里补一次。
+   */
+  handlePageResume(): void {
+    if (this.disposed || !this.isVisible) return;
+    // 无论面板是否有内容都补拉一次：后台冻结期间生成的回复可能没到前端。
+    this.transcriptLoaded = false;
+    void this.hydrateConversation(this.activeThreadId || undefined, true);
+    if (this.connection !== 'online' && this.wsSend) this.resumeConnection();
+  }
+
   setBeforeShowHandler(handler: () => void): void {
     this.beforeShowHandler = handler;
   }
@@ -1560,13 +1572,15 @@ export class AgentPanel {
     content: string,
     options: { hasTerminalSelection?: boolean; userIndex?: number } = {}
   ): void {
+    // 服务端线程里助手消息可能以 assistant/response 两种写法出现，这里统一归一。
+    const normalizedRole = role === 'assistant' ? 'response' : role;
     const el = document.createElement('div');
-    el.className = `agent-message agent-${role}`;
+    el.className = `agent-message agent-${normalizedRole}`;
 
-    const isUser = role === 'user';
-    const isAgent = role === 'response';
-    const isExecuting = role === 'executing';
-    const isError = role === 'error';
+    const isUser = normalizedRole === 'user';
+    const isAgent = normalizedRole === 'response';
+    const isExecuting = normalizedRole === 'executing';
+    const isError = normalizedRole === 'error';
 
     const themeColor = isUser
       ? 'var(--agent-user-color)'
@@ -1589,8 +1603,12 @@ export class AgentPanel {
       renderedContent = this.renderMarkdown(content || '');
     } else if (isExecuting) {
       renderedContent = `<div class="font-code text-[11px]" style="color:${themeColor};white-space:pre-wrap;word-break:break-all;">${escapeHtml(content)}</div>`;
+    } else if (isAgent) {
+      // 兜底：任何走到这里的助手消息（角色别名、历史回填）仍然按 Markdown 渲染，
+      // 否则 `|`、`##`、`-` 会原样显示成一段乱字。
+      renderedContent = this.renderMarkdown(content || '');
     } else {
-      renderedContent = `<div style="color:${themeColor};word-break:break-word;">${escapeHtml(content)}</div>`;
+      renderedContent = `<div style="color:${themeColor};word-break:break-word;white-space:pre-wrap;">${escapeHtml(content)}</div>`;
     }
 
     // User messages: bubble on right. Agent/others: full width on left.
@@ -2059,7 +2077,8 @@ export class AgentPanel {
   private async hydrateConversation(threadId?: string, force = false): Promise<void> {
     if (this.disposed || !this.isLoggedIn || !this.serverId) return;
     if (!force && this.transcriptLoaded) return;
-    if (this.sessionMessages.length > 0) return;
+    // force 用于「后台恢复后补拉」：允许覆盖当前面板内容，以服务端记录为准。
+    if (!force && this.sessionMessages.length > 0) return;
     if (!force) this.transcriptLoaded = true;
     try {
       const query = threadId ? `?thread=${encodeURIComponent(threadId)}` : '';
@@ -2067,7 +2086,10 @@ export class AgentPanel {
       if (!res.ok) return;
       const transcript = (await res.json()) as unknown;
       if (!isConversationTranscript(transcript)) return;
-      if (this.disposed || this.sessionMessages.length > 0 || !this.messagesEl) return;
+      if (this.disposed || !this.messagesEl) return;
+      // 正在流式输出时不要覆盖，避免把用户眼前的内容清掉。
+      if (!force && this.sessionMessages.length > 0) return;
+      if (force && this.isAgentRunning && this.streamingEl) return;
       if (transcript.thread_id) this.activeThreadId = transcript.thread_id;
       const messages = transcript.messages.filter((message) => message.content.trim().length > 0);
       if (messages.length === 0) return;
