@@ -234,6 +234,8 @@ export class AgentPanel {
     } else if (this.isVisible && this.serverId) {
       void this.fetchServerMemory();
     }
+    // 先恢复本地草稿（会话意外结束时保留的可见记录），再从服务端线程补齐。
+    this.loadSessionDraft();
     void this.hydrateConversation();
   }
 
@@ -262,6 +264,25 @@ export class AgentPanel {
   }
 
   hasActiveTask(): boolean { return this.isAgentRunning || this.isWaitingConfirmation; }
+
+  /**
+   * SSH 会话被服务端或远端结束时调用（空闲超时、远端关闭 shell 等）。
+   *
+   * 这里不销毁面板：已显示的对话必须留在眼前，同时落一份本地草稿，
+   * 这样即便之后重建面板也能立刻看到刚才的问答，而不是一片空白。
+   */
+  handleSessionEnded(): void {
+    if (this.disposed) return;
+    this.rejectPendingConfirmation(false);
+    this.clearStateSync();
+    this.clearAutoConfirmTimers();
+    this.connection = 'reconnecting';
+    this.isAgentRunning = false;
+    this.activeRequestId = null;
+    // 强制保存：把当前可见对话写进本地草稿，避免「窗口一关记录就没了」。
+    this.saveSessionDraft(true);
+    this.updateInputState();
+  }
 
   suspendConnection(): void {
     if (this.disposed) return;

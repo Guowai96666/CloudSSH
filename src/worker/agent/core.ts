@@ -476,6 +476,8 @@ export class AgentCore {
     const pending = [...this.persistedTurn];
     this.persistedTurn = [];
     if (!pending.length) return;
+    // 工具阶段被中断时 finalText 可能为空，但用户提问已经发生：
+    // 至少要把提问落库，避免「发了消息却查不到记录」。
     const messages: ConversationAppendInput[] = assistant
       ? [...pending, { role: 'assistant', content: assistant }]
       : pending;

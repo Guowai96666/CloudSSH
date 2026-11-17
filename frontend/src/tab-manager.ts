@@ -132,12 +132,11 @@ export class TabManager {
           tab.sftpPanel = null;
         }
         // A transport interruption must not destroy the surviving Agent task UI.
+        // 会话终止（空闲超时、远端关闭 shell）同样保留面板：已显示的问答必须留在眼前，
+        // 面板内容另有一份本地草稿兜底，重建后也不会空白。
         if (tab.agentPanel) {
           if (willReconnect) tab.agentPanel.suspendConnection();
-          else {
-            tab.agentPanel.dispose();
-            tab.agentPanel = null;
-          }
+          else tab.agentPanel.handleSessionEnded();
         }
         tab.selectedText = '';
         tab.selectionAnchor = null;
@@ -153,6 +152,9 @@ export class TabManager {
           if (tab.agentPanel.hasActiveTask()) {
             notify(t('agent.previousSessionEnded'), { variant: 'warning' });
           }
+          // 新建 Shell 不接管旧任务：先落草稿保住已显示的对话，再重建面板。
+          // 新面板 render() 时会从草稿与服务端线程恢复记录，因此不会空白。
+          tab.agentPanel.handleSessionEnded();
           tab.agentPanel.dispose();
           tab.agentPanel = null;
         }

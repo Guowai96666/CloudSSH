@@ -1,9 +1,27 @@
 import { expect, test, type Page } from './fixtures';
 import { mockAnonymousSession } from './helpers';
 
+/**
+ * 面板复用后会补拉会话记录与线程列表，这两个接口必须在每个用例里显式声明，
+ * 否则 apiIsolation 会判定为未 mock 请求。
+ */
+async function mockConversation(page: Page) {
+  await page.route('**/api/servers/1/conversation*', async route => {
+    if (route.request().method() === 'GET') {
+      await route.fulfill({ json: { thread_id: 'thread00000001', title: 't', title_custom: false,
+        created_at: 1, updated_at: 2, revision: 1, messages: [] } });
+      return;
+    }
+    await route.fulfill({ json: { success: true } });
+  });
+  await page.route('**/api/servers/1/conversations*', route =>
+    route.fulfill({ json: { threads: [], active_thread_id: null } }));
+}
+
 async function mount(page: Page, tabs = false) {
   await mockAnonymousSession(page);
   await page.route('**/api/servers/1/memory', route => route.fulfill({ json: { workLogs: [], knowledge: [] } }));
+  await mockConversation(page);
   await page.goto('/?lang=zh-CN');
   await page.evaluate(async (withTabs) => {
     const sent: any[] = [];
@@ -49,6 +67,7 @@ async function state(page: Page, overrides: Record<string, unknown> = {}) {
 test('真实 WebSocket 关闭与 session_resumed 事件驱动恢复，不重新发送原任务', async ({ page }) => {
   await mockAnonymousSession(page);
   await page.route('**/api/servers/1/memory', route => route.fulfill({ json: { workLogs: [], knowledge: [] } }));
+  await mockConversation(page);
   await page.addInitScript(() => {
     const sockets: any[] = [];
     const sent: any[] = [];
@@ -351,4 +370,35 @@ test('busy 自愈同步；同步失败仍能停止当前任务，而不是必须
   await state(page, { phase: 'idle', outcome: 'stopped' });
   await page.locator('#agent-input').fill('next task');
   await expect(page.locator('#agent-send-btn')).toBeEnabled();
+});
+
+test('SSH 会话结束时保留已显示的对话，不销毁面板也不清空记录', async ({ page }) => {
+  await mount(page, true);
+  const result = await page.evaluate(() => {
+    const { panel, manager, tab } = (window as any).__recovery;
+    panel.handleAgentFrame({ subType: 'run_start' });
+    panel.handleAgentFrame({ subType: 'stream_end', content: '会话结束前的回复 KEEP-ME' });
+    const before = document.querySelectorAll('#agent-messages .agent-message').length;
+    const beforeText = document.getElementById('agent-messages')!.textContent || '';
+    // 模拟服务端空闲超时 / 远端关闭 shell：willReconnect=false
+    tab.terminal.onSessionClosed(new CloseEvent('close', { code: 1000 }), false);
+    const panelAfter = document.getElementById('agent-panel');
+    const draftKey = 'cloudssh_agent_draft_42_1';
+    return {
+      before,
+      beforeHadText: beforeText.includes('KEEP-ME'),
+      disposed: panel.disposed,
+      panelAlive: Boolean(panelAfter),
+      draft: localStorage.getItem(draftKey),
+      stillOnScreen: (document.getElementById('agent-messages')!.textContent || '').includes('KEEP-ME'),
+      managerAlive: Boolean(manager),
+    };
+  });
+  expect(result.beforeHadText).toBe(true);
+  // 面板不能被销毁，记录要留在屏幕上
+  expect(result.disposed).toBe(false);
+  expect(result.panelAlive).toBe(true);
+  expect(result.stillOnScreen).toBe(true);
+  // 同时落一份草稿，重建面板后仍可恢复
+  expect(result.draft).toContain('KEEP-ME');
 });
